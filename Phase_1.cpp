@@ -143,9 +143,114 @@ public:
 
 
 
+// ------ MEAL::MEAL ------
+Meal::Meal() {
+    meal_id = 0;
+    name = "";
+    price = 0.0;
+    meal_type = BREAKFAST;
+    side_items.clear();
+}
+//--------------------------------------
+void Meal::print() {
+    cout << "Meal ID: "<< meal_id<< endl;
+    cout << "Name: " << name << endl;
+    cout << "Price: " <<price << endl;
+    cout << "Type: ";
+    switch (meal_type) {
+        case BREAKFAST: cout << "Breakfast"; break;
+        case LUNCH: cout << "Lunch"; break;
+        case DINNER: cout << "Dinner"; break;
+    }
+    cout << endl;
+    
+    cout << "Side Items: ";
+    for (const auto& item : side_items){
+        cout << item << " ";
+    }
+    cout << endl;
+}
+//--------------------------------------
+void Meal::set_meal_id(int id) {meal_id = id;}
+void Meal::set_name(const string& name) {this->name = name;}
+void Meal::set_price(float price) {this->price = price;}
+void Meal::set_meal_type(MealType type) {meal_type = type;}
+//--------------------------------------
+int Meal::get_meal_id() {return meal_id;}
+string Meal::get_name() {return name;}
+float Meal::get_price() {return price;}
+MealType Meal::get_meal_type() {return meal_type;}
+vector<string> Meal::get_side_items() {return side_items;}
+//--------------------------------------
+void Meal::update_price(float new_price) {price = new_price;}
+void Meal::add_side_item(const string& item) {side_items.push_back(item);}
 
 
+// ------ DININGHALL::DININGHALL ------
+DiningHall::DiningHall() {
+    hall_id = 0;
+    name = "";
+    address = "";
+    capacity = 0;
+}
+//--------------------------------------
+void DiningHall::print() {
+    cout << "Dining Hall ID: " << hall_id << endl;
+    cout << "Name: " << name << endl;
+    cout << "Address: " << address << endl;
+    cout << "Capacity: " << capacity << endl;
+}
 
+//--------------------------------------
+void DiningHall::set_hall_id(int id) { hall_id = id; }
+void DiningHall::set_name(const string& name) {this->name = name;}
+void DiningHall::set_address(const string& address){this->address = address;}
+void DiningHall::set_capacity(int capacity) {this->capacity = capacity;}
+
+//--------------------------------------
+int DiningHall::get_hall_id() {return hall_id;}
+string DiningHall::get_name() {return name;}
+string DiningHall::get_address() {return address;}
+int DiningHall::get_capacity() {return capacity;}
+
+
+// ------ STUDENT::STUDENT ------
+Student::Student() {
+    user_id = 0;
+    student_id = "";
+    name = "";
+    email = "";
+    balance = 0.0;
+    is_active = false;
+    reservations.clear();
+}
+
+//--------------------------------------
+void Student::print() {
+    cout << "User ID: " << user_id << endl;
+    cout << "Student ID: " << student_id << endl;
+    cout << "Name: " << name << endl;
+    cout << "Email: " << email << endl;
+    cout << "Balance: " << balance << endl;
+    cout << "Active: " << (is_active ? "Yes" : "No") << endl;
+
+    cout << "Reservations Count: " << reservations.size() << endl;
+}
+//--------------------------------------
+void Student::set_user_id(int id) {user_id = id; }
+void Student::set_student_id(const string& id) {student_id = id; }
+void Student::set_name(const string& name) {this->name = name; }
+void Student::set_email(const string& email) {this->email = email; }
+void Student::set_balance(float balance) {this->balance = balance;}
+void Student::set_active(bool active) {is_active = active; }
+//--------------------------------------
+int Student::get_user_id() {return user_id; }
+string Student::get_student_id() {return student_id; }
+string Student::get_name() { return name;}
+string Student::get_email() {return email;}
+float Student::get_balance() {return balance;}
+bool Student::get_active() { return is_active;}
+//--------------------------------------
 
 
 
