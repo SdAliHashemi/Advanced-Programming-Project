@@ -253,6 +253,40 @@ bool Student::get_active() { return is_active;}
 //--------------------------------------
 
 
+// ------ RESERVATION::RESERVATION ------
+Reservation::Reservation() {
+    reservation_id = 0;
+    status = FAILED;
+    created_at = time(nullptr);
+}
+
+//--------------------------------------
+void Reservation::print() {
+    cout << "Reservation ID: " <<reservation_id << endl;
+    cout << "Status: ";
+    switch (status) {
+        case SUCCESS: cout <<"Success!"; break;
+        case CANCELLED: cout << "Cancelled!"; break;
+        case FAILED: cout <<"Failed!"; break;
+    }
+    cout << endl;
+
+    cout << "Created At: "<<ctime(&created_at);
+
+    cout << "--- Student Info ---" << endl;
+    student.print();
+    cout << "--- Dining Hall ---" << endl;
+    dHall.print();
+    cout << "--- Meal Info ---" <<endl;
+    meal.print();
+}
+
+//--------------------------------------
+bool Reservation::cancel() {
+    if (status == CANCELLED) return false;
+    status = CANCELLED;
+    return true;
+}
 
 
 
