@@ -10,7 +10,7 @@ using namespace std;
 
 
 enum MealType { BREAKFAST, LUNCH, DINNER };
-enum ReservationStatus { SUCCESS, CANCELLED, FAILED};
+enum ReservationStatus { SUCCESS, CANCELLED, FAILED };
 
 // -------------------------- Classes! --------------------------
 
@@ -368,45 +368,6 @@ bool Student::cancel_reservation(int reservation_id) {
     cout << "Cancellation failed: reservation not found."<< endl;
     return false;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
