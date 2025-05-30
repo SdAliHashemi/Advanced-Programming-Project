@@ -1,7 +1,5 @@
-//               Seyyed Ali Moaven Hashemi
-//               Project Reservation System : Phase_1 : Main.cpp
-//               -----------------------------------------
 #include <iostream>
+#include "User.h"
 #include "Meal.h"
 #include "DiningHall.h"
 #include "Student.h"
