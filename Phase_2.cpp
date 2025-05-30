@@ -8,9 +8,10 @@
 #include <ctime>
 using namespace std;
 
-
+enum ReserveDay { SATURDAY, SUNDAY, MONDAY, TUESDAY, WEDNESDAY };
 enum MealType { BREAKFAST, LUNCH, DINNER };
 enum ReservationStatus { SUCCESS, CANCELLED, FAILED };
+enum RStatus { SUCCESS, FAILED, CANCELLED };
 
 // -------------------------- Classes! --------------------------
 
@@ -19,6 +20,40 @@ class Meal;
 class DiningHall;
 class Student;
 class Reservation;
+
+
+
+// --------- User ---------
+class User {
+protected:
+    int id;
+    string name;
+    string email;
+    string password;
+
+public:
+    User();
+
+
+    // Getters
+    int get_id() const;
+    string get_name() const;
+    string get_email() const;
+    string get_password() const;
+
+    virtual void print() const = 0;
+    virtual string getType() const = 0;
+
+    // Setters
+    void set_id(int _id);
+    void set_name(const string& _name);
+    void set_email(const string& _email);
+    void set_password(const string& _password);
+
+    
+
+    virtual ~User();
+};
 
 // --------- Meal ---------
 class Meal {
@@ -35,14 +70,14 @@ public:
     void update_price(float new_price);
     void add_side_item(const string& item);
 
-    // getters
+    // Getters
     int get_meal_id();
     string get_name();
     float get_price();
     MealType get_meal_type();
     vector<string> get_side_items();
 
-    // setters
+    // Setters
     void set_meal_id(int id);
     void set_name(const string& name);
     void set_price(float price);
@@ -62,13 +97,13 @@ public:
     DiningHall();
     void print();
 
-    // getters
+    // Getters
     int get_hall_id();
     string get_name();
     string get_address();
     int get_capacity();
 
-    // setters
+    // Setters
     void set_hall_id(int id);
     void set_name(const string& name);
     void set_address(const string& address);
@@ -93,7 +128,7 @@ public:
     bool reserve_meal(const Meal& meal, const DiningHall& hall);
     bool cancel_reservation(int reservation_id);
 
-    // getters
+    // Getters
     int get_user_id();
     string get_student_id();
     string get_name();
@@ -101,7 +136,7 @@ public:
     float get_balance();
     bool get_active();
 
-    // setters
+    // Setters
     void set_user_id(int id);
     void set_student_id(const string& id);
     void set_name(const string& name);
@@ -126,7 +161,7 @@ public:
     void print();
     bool cancel();
 
-    // getters
+    // Getters
     int get_reservation_id();
     Student get_student();
     DiningHall get_dining_hall();
@@ -134,7 +169,7 @@ public:
     ReservationStatus get_status();
     time_t get_created_at();
 
-    // setters
+    // Setters
     void set_reservation_id(int id);
     void set_student(const Student& student);
     void set_dining_hall(const DiningHall& hall);
@@ -143,6 +178,22 @@ public:
     void set_created_at(time_t created);
 };
 
+
+
+// ------ USER::USER ------
+User::User() : id(0), name(""), email(""), password("") {}
+//--------------------------------------
+void User::set_id(int _id) { id = _id; }
+void User::set_name(const string& _name) { name = _name; }
+void User::set_email(const string& _email) { email = _email; }
+void User::set_password(const string& _password) { password = _password; }
+//--------------------------------------
+int User::get_id() const { return id; }
+string User::get_name() const { return name; }
+string User::get_email() const { return email; }
+string User::get_password() const { return password; }
+//--------------------------------------
+User::~User() {}
 
 
 
