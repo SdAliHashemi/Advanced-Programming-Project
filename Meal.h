@@ -1,11 +1,10 @@
 //               Seyyed Ali Moaven Hashemi
-//               Project Reservation System : Phase_1 : Meal.h
+//               Project Reservation System : Phase_2 : Meal.h
 //               -----------------------------------------
 #pragma once
 #include <iostream>
 #include <string>
 #include <vector>
-
 enum MealType { BREAKFAST, LUNCH, DINNER };
 
 class Meal {
