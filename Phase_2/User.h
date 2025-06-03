@@ -2,9 +2,7 @@
 //               Project Reservation System : Phase_2 : User.h
 //               -----------------------------------------
 #pragma once
-#include <iostream>
 #include <string>
-#include <vector>
 
 class User {
 protected:
@@ -16,7 +14,6 @@ protected:
 public:
     User();
 
-    // Getters
     int get_id() const;
     std::string get_name() const;
     std::string get_email() const;
@@ -25,7 +22,6 @@ public:
     virtual void print() const = 0;
     virtual std::string getType() const = 0;
 
-    // Setters
     void set_id(int _id);
     void set_name(const std::string& _name);
     void set_email(const std::string& _email);

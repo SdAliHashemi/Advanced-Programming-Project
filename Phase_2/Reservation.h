@@ -1,41 +1,41 @@
 //               Seyyed Ali Moaven Hashemi
-//               Project Reservation System : Phase_1 : Reservation.h
+//               Project Reservation System : Phase_2 : Reservation.h
 //               -----------------------------------------
 #pragma once
-#include <iostream>
-#include <ctime>
+#include "Student.h"
 #include "Meal.h"
 #include "DiningHall.h"
-#include "Student.h"
+#include <ctime>
 
-enum ReservationStatus { SUCCESS, CANCELLED, FAILED };
+enum RStatus { SUCCESS, FAILED, CANCELLED };
 
 class Reservation {
 private:
     int reservation_id;
     Student student;
-    DiningHall dHall;
-    Meal meal;
-    ReservationStatus status;
+    Meal* meal;
+    DiningHall* dHall;
+    RStatus status;
     time_t created_at;
 
 public:
     Reservation();
-    void print();
-    bool cancel();
+
+    void set_reservation_id(int id);
+    void set_student(const Student& s);
+    void set_meal(Meal* m);
+    void set_dining_hall(DiningHall* d);
+    void set_status(RStatus s);
+    void set_created_at(time_t t);
 
     int get_reservation_id();
     Student get_student();
-    DiningHall get_dining_hall();
-    Meal get_meal();
-    ReservationStatus get_status();
+    Meal* get_meal();
+    DiningHall* get_dining_hall();
+    RStatus get_status();
     time_t get_created_at();
 
-    void set_reservation_id(int id);
-    void set_student(const Student& student);
-    void set_dining_hall(const DiningHall& hall);
-    void set_meal(const Meal& meal);
-    void set_status(ReservationStatus status);
-    void set_created_at(time_t created);
+    bool cancel();
+    void print();
 };
 
