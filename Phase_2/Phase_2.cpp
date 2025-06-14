@@ -28,9 +28,9 @@ class User {
 protected:
     int id;
     string name;
+    string lastName;
     string email;
     string password;
-
 public:
     User();
 
@@ -38,6 +38,7 @@ public:
     // Getters
     int get_id() const;
     string get_name() const;
+    string get_last_name() const;
     string get_email() const;
     string get_password() const;
 
@@ -47,6 +48,7 @@ public:
     // Setters
     void set_id(int _id);
     void set_name(const string& _name);
+    void set_last_name(const string& _lastName);
     void set_email(const string& _email);
     void set_password(const string& _password);
 
@@ -137,8 +139,10 @@ public:
 // --------- Student ---------
 class Student : public User {
 private:
+    string student_id;
     string phone;
     bool isActive;
+    float balance;
     vector<Reservation> reservations;
 
 public:
@@ -149,15 +153,17 @@ public:
     string getType() const override;
 
     // ==== Setters ====
+    void set_student_id(const string& sid);
     void set_phone(const string& p);
     void activate();
     void deactivate();
-
+    void set_balance(float b);
     // ==== Getters ====
+    string get_student_id() const;
     string get_phone() const;
     bool is_active() const;
     vector<Reservation> get_reserves() const;
-
+    float get_balance() const;
     // ==== Actions ====
     bool reserve_meal(Meal* meal, DiningHall* hall);
     bool cancel_reservation(int reservation_id);
@@ -170,7 +176,7 @@ public:
 class Reservation {
 private:
     int reservation_id;
-    Student student;
+    Student* student;
     Meal* meal;
     DiningHall* dHall;
     RStatus status;
@@ -181,7 +187,7 @@ public:
 
     // Setters
     void set_reservation_id(int id);
-    void set_student(const Student& s);
+    void set_student(Student* s);
     void set_meal(Meal* m);
     void set_dining_hall(DiningHall* d);
     void set_status(RStatus s);
@@ -208,11 +214,13 @@ User::User() : id(0), name(""), email(""), password("") {}
 //--------------------------------------
 void User::set_id(int _id) { id = _id; }
 void User::set_name(const string& _name) { name = _name; }
+void User::set_last_name(const string& _lastName) { lastName = _lastName; }
 void User::set_email(const string& _email) { email = _email; }
 void User::set_password(const string& _password) { password = _password; }
 //--------------------------------------
 int User::get_id() const { return id; }
 string User::get_name() const { return name; }
+string User::get_last_name() const { return lastName; }
 string User::get_email() const { return email; }
 string User::get_password() const { return password; }
 //--------------------------------------
@@ -328,8 +336,10 @@ int DiningHall::get_capacity() {return capacity;}
 
 // ------ STUDENT::STUDENT ------
 Student::Student() : User() {
+    student_id = "";
     phone = "";
     isActive = false;
+    balance = 0.0;
     reservations.clear();
 }
 
@@ -349,13 +359,16 @@ string Student::getType() const {
 }
 
 //--------------------------------------
+void Student::set_student_id(const string& sid) { student_id = sid; }
 void Student::set_phone(const string& p) { phone = p; }
 void Student::activate() { isActive = true; }
 void Student::deactivate() { isActive = false; }
-
+void Student::set_balance(float b) { balance = b; }
 //--------------------------------------
+string Student::get_student_id() const { return student_id; }
 string Student::get_phone() const { return phone; }
 bool Student::is_active() const { return isActive; }
+float Student::get_balance() const { return balance; }
 vector<Reservation> Student::get_reserves() const { return reservations; }
 //--------------------------------------
 bool Student::reserve_meal(Meal* meal, DiningHall* hall) {
@@ -436,14 +449,14 @@ Reservation::Reservation() {
 }
 //--------------------------------------
 void Reservation::set_reservation_id(int id) { reservation_id = id; }
-void Reservation::set_student(const Student& s) { student = s; }
+void Reservation::set_student(Student* s) { student = s; }
 void Reservation::set_meal(Meal* m) { meal = m; }
 void Reservation::set_dining_hall(DiningHall* d) { dHall = d; }
 void Reservation::set_status(RStatus s) { status = s; }
 void Reservation::set_created_at(time_t t) { created_at = t; }
 //--------------------------------------
 int Reservation::get_reservation_id() { return reservation_id; }
-Student Reservation::get_student() { return student; }
+Student* Reservation::get_student() { return student; }
 Meal* Reservation::get_meal() { return meal; }
 DiningHall* Reservation::get_dining_hall() { return dHall; }
 RStatus Reservation::get_status() { return status; }
