@@ -10,7 +10,6 @@ using namespace std;
 
 enum ReserveDay { SATURDAY, SUNDAY, MONDAY, TUESDAY, WEDNESDAY };
 enum MealType { BREAKFAST, LUNCH, DINNER };
-enum ReservationStatus { SUCCESS, CANCELLED, FAILED };
 enum RStatus { SUCCESS, FAILED, CANCELLED };
 
 // =========================== Classes! ===========================
@@ -20,8 +19,6 @@ class Meal;
 class DiningHall;
 class Student;
 class Reservation;
-
-
 
 // --------- User ---------
 class User {
@@ -33,7 +30,6 @@ protected:
     string password;
 public:
     User();
-
 
     // Getters
     int get_id() const;
@@ -52,13 +48,8 @@ public:
     void set_email(const string& _email);
     void set_password(const string& _password);
 
-    
-
     virtual ~User();
 };
-
-
-
 
 // --------- Admin ---------
 class Admin : public User {
@@ -68,8 +59,6 @@ public:
     void print() const override;
     string getType() const override;
 };
-
-
 
 // --------- Meal ---------
 class Meal {
@@ -108,8 +97,6 @@ public:
     bool is_active();
 };
 
-
-
 // --------- DiningHall ---------
 class DiningHall {
 private:
@@ -134,7 +121,6 @@ public:
     void set_address(const string& address);
     void set_capacity(int capacity);
 };
-
 
 // --------- Student ---------
 class Student : public User {
@@ -169,9 +155,6 @@ public:
     bool cancel_reservation(int reservation_id);
 };
 
-
-
-
 // --------- Reservation ---------
 class Reservation {
 private:
@@ -195,7 +178,7 @@ public:
 
     // Getters
     int get_reservation_id();
-    Student get_student();
+    Student* get_student();
     Meal* get_meal();
     DiningHall* get_dining_hall();
     RStatus get_status();
@@ -206,11 +189,43 @@ public:
     void print();
 };
 
+// --------- Panel (Skeleton) ---------
+class Panel {
+public:
+    void Action(int);
+    void showMenu();
+    void exit();
+};
+
+// --------- Storage (Singleton) ---------
+class Storage {
+private:
+    int _mealIDCounter;
+    int _diningHallIDCounter;
+    vector<Meal> allMeals;
+    vector<DiningHall> allDiningHalls;
+
+    Storage() : _mealIDCounter(0), _diningHallIDCounter(0) {}
+    Storage(const Storage&) = delete;
+    Storage& operator=(const Storage&) = delete;
+
+public:
+    static Storage& instance() {
+        static Storage instance;
+        return instance;
+    }
+
+    vector<Meal>& getAllMeals() { return allMeals; }
+    vector<DiningHall>& getAllDiningHalls() { return allDiningHalls; }
+
+    int nextMealID() { return ++_mealIDCounter; }
+    int nextDiningHallID() { return ++_diningHallIDCounter; }
+};
 
 //=================================================================================
 
 // ------ USER::USER ------
-User::User() : id(0), name(""), email(""), password("") {}
+User::User() : id(0), name(""), lastName(""), email(""), password("") {}
 //--------------------------------------
 void User::set_id(int _id) { id = _id; }
 void User::set_name(const string& _name) { name = _name; }
@@ -226,26 +241,19 @@ string User::get_password() const { return password; }
 //--------------------------------------
 User::~User() {}
 
-
-
-
 // ------ ADMIN::ADMIN ------
 Admin::Admin() : User() {}
 //--------------------------------------
 void Admin::print() const {
     cout << "[ADMIN]" << endl;
     cout << "ID: " << id << endl;
-    cout << "Name: " << name << endl;
+    cout << "Name: " << name << " " << lastName << endl;
     cout << "Email: " << email << endl;
 }
 //--------------------------------------
 string Admin::getType() const {
     return "Admin";
 }
-
-
-
-
 
 // ------ MEAL::MEAL ------
 Meal::Meal() {
@@ -304,8 +312,6 @@ vector<string> Meal::get_side_items() { return side_items; }
 ReserveDay Meal::get_reserve_day() { return reserve_day; }
 bool Meal::is_active() { return isActive; }
 
-
-
 // ------ DININGHALL::DININGHALL ------
 DiningHall::DiningHall() {
     hall_id = 0;
@@ -320,19 +326,16 @@ void DiningHall::print() {
     cout << "Address: " << address << endl;
     cout << "Capacity: " << capacity << endl;
 }
-
 //--------------------------------------
 void DiningHall::set_hall_id(int id) { hall_id = id; }
-void DiningHall::set_name(const string& name) {this->name = name;}
-void DiningHall::set_address(const string& address){this->address = address;}
-void DiningHall::set_capacity(int capacity) {this->capacity = capacity;}
-
+void DiningHall::set_name(const string& name) { this->name = name; }
+void DiningHall::set_address(const string& address) { this->address = address; }
+void DiningHall::set_capacity(int capacity) { this->capacity = capacity; }
 //--------------------------------------
-int DiningHall::get_hall_id() {return hall_id;}
-string DiningHall::get_name() {return name;}
-string DiningHall::get_address() {return address;}
-int DiningHall::get_capacity() {return capacity;}
-
+int DiningHall::get_hall_id() { return hall_id; }
+string DiningHall::get_name() { return name; }
+string DiningHall::get_address() { return address; }
+int DiningHall::get_capacity() { return capacity; }
 
 // ------ STUDENT::STUDENT ------
 Student::Student() : User() {
@@ -342,22 +345,19 @@ Student::Student() : User() {
     balance = 0.0;
     reservations.clear();
 }
-
 //--------------------------------------
 void Student::print() const {
     cout << "[STUDENT]" << endl;
     cout << "ID: " << id << endl;
-    cout << "Name: " << name << endl;
+    cout << "Name: " << name << " " << lastName << endl;
     cout << "Email: " << email << endl;
     cout << "Phone: " << phone << endl;
     cout << "Active: " << (isActive ? "Yes" : "No") << endl;
     cout << "Reservations Count: " << reservations.size() << endl;
 }
-
 string Student::getType() const {
     return "Student";
 }
-
 //--------------------------------------
 void Student::set_student_id(const string& sid) { student_id = sid; }
 void Student::set_phone(const string& p) { phone = p; }
@@ -403,7 +403,7 @@ bool Student::reserve_meal(Meal* meal, DiningHall* hall) {
 
     Reservation new_res;
     new_res.set_reservation_id(reservations.size() + 1);
-    new_res.set_student(*this);
+    new_res.set_student(this);
     new_res.set_meal(meal);
     new_res.set_dining_hall(hall);
     new_res.set_status(SUCCESS);
@@ -437,11 +437,10 @@ bool Student::cancel_reservation(int reservation_id) {
     return false;
 }
 
-
-
 // ------ RESERVATION::RESERVATION ------
 Reservation::Reservation() {
     reservation_id = 0;
+    student = nullptr;
     meal = nullptr;
     dHall = nullptr;
     status = FAILED;
@@ -479,8 +478,10 @@ void Reservation::print() {
     cout << endl;
 
     cout << "Created At: " << ctime(&created_at);
-    cout << "--- Student Info ---" << endl;
-    student.print();
+    if (student) {
+        cout << "--- Student Info ---" << endl;
+        student->print();
+    }
     if (dHall) {
         cout << "--- Dining Hall ---" << endl;
         dHall->print();
@@ -491,19 +492,12 @@ void Reservation::print() {
     }
 }
 
+int main() {
+    
 
 
-int main(){
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	
-	return 0;
+
+
+
+
 }
