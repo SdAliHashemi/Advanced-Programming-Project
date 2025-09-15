@@ -1,5 +1,5 @@
 //               Seyyed Ali Moaven Hashemi
-//               Project Reservation System : Phase_3 (Updated)
+//               Project Reservation System : Phase_3
 //               -----------------------------------------
 
 #include <iostream>
