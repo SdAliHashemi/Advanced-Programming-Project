@@ -6,11 +6,17 @@
 #include <string>
 #include <vector>
 #include <ctime>
+#include <iomanip> // for setw if needed
 using namespace std;
 
+// ======= Enums =======
 enum ReserveDay { SATURDAY, SUNDAY, MONDAY, TUESDAY, WEDNESDAY };
 enum MealType { BREAKFAST, LUNCH, DINNER };
-enum RStatus { SUCCESS, FAILED, CANCELLED };
+enum RStatus { SUCCESS, FAILED, CANCELLED, NOT_PAID };
+
+enum TransactionType { TRANSFER, PAYMENT };
+enum TransactionStatus { PENDING, COMPLETED, FAILED_TX };
+enum SessionStatus { AUTHENTICATED, ANONYMOUS };
 
 // =========================== Classes! ===========================
 
@@ -19,6 +25,9 @@ class Meal;
 class DiningHall;
 class Student;
 class Reservation;
+class ShoppingCart;
+class Transaction;
+class SessionBase;
 
 // --------- User ---------
 class User {
@@ -74,7 +83,7 @@ private:
 public:
     Meal();
 
-    void print();
+    void print() const;
     void update_price(float new_price);
     void add_side_item(const string& item);
 
@@ -88,13 +97,13 @@ public:
     void deactivate();
 
     // Getters
-    int get_meal_id();
-    string get_name();
-    float get_price();
-    MealType get_meal_type();
-    vector<string> get_side_items();
-    ReserveDay get_reserve_day();
-    bool is_active();
+    int get_meal_id() const;
+    string get_name() const;
+    float get_price() const;
+    MealType get_meal_type() const;
+    vector<string> get_side_items() const;
+    ReserveDay get_reserve_day() const;
+    bool is_active() const;
 };
 
 // --------- DiningHall ---------
@@ -107,52 +116,19 @@ private:
 
 public:
     DiningHall();
-    void print();
+    void print() const;
 
     // Getters
-    int get_hall_id();
-    string get_name();
-    string get_address();
-    int get_capacity();
+    int get_hall_id() const;
+    string get_name() const;
+    string get_address() const;
+    int get_capacity() const;
 
     // Setters
     void set_hall_id(int id);
     void set_name(const string& name);
     void set_address(const string& address);
     void set_capacity(int capacity);
-};
-
-// --------- Student ---------
-class Student : public User {
-private:
-    string student_id;
-    string phone;
-    bool isActive;
-    float balance;
-    vector<Reservation> reservations;
-
-public:
-    Student();
-
-    // ==== Overrides ====
-    void print() const override;
-    string getType() const override;
-
-    // ==== Setters ====
-    void set_student_id(const string& sid);
-    void set_phone(const string& p);
-    void activate();
-    void deactivate();
-    void set_balance(float b);
-    // ==== Getters ====
-    string get_student_id() const;
-    string get_phone() const;
-    bool is_active() const;
-    vector<Reservation> get_reserves() const;
-    float get_balance() const;
-    // ==== Actions ====
-    bool reserve_meal(Meal* meal, DiningHall* hall);
-    bool cancel_reservation(int reservation_id);
 };
 
 // --------- Reservation ---------
@@ -177,16 +153,16 @@ public:
     void set_created_at(time_t t);
 
     // Getters
-    int get_reservation_id();
-    Student* get_student();
-    Meal* get_meal();
-    DiningHall* get_dining_hall();
-    RStatus get_status();
-    time_t get_created_at();
+    int get_reservation_id() const;
+    Student* get_student() const;
+    Meal* get_meal() const;
+    DiningHall* get_dining_hall() const;
+    RStatus get_status() const;
+    time_t get_created_at() const;
 
     // Methods
     bool cancel();
-    void print();
+    void print() const;
 };
 
 // --------- Panel (Skeleton) ---------
@@ -194,6 +170,13 @@ class Panel {
 public:
     void Action(int);
     void showMenu();
+    void showStudentInfo();
+    void checkBalance();
+    void viewReservations();
+    void viewShoppingCart();
+    void addToShoppingCart();
+    void removeShoppingCartItem();
+    void increaseBalance();
     void exit();
 };
 
@@ -221,6 +204,126 @@ public:
     int nextMealID() { return ++_mealIDCounter; }
     int nextDiningHallID() { return ++_diningHallIDCounter; }
 };
+
+// --------- Transaction ---------
+class Transaction {
+private:
+    int _transactionID;
+    string _trackingCode;
+    float _amount;
+    TransactionType _type;
+    TransactionStatus _status;
+    time_t _createdAt;
+
+public:
+    Transaction();
+    // getters
+    int get_transaction_id() const;
+    string get_tracking_code() const;
+    float get_amount() const;
+    TransactionType get_type() const;
+    TransactionStatus get_status() const;
+    time_t get_created_at() const;
+    // setters
+    void set_transaction_id(int id);
+    void set_tracking_code(const string& code);
+    void set_amount(float amount);
+    void set_type(TransactionType t);
+    void set_status(TransactionStatus s);
+    void set_created_at(time_t t);
+
+    void print() const;
+};
+
+// --------- ShoppingCart ---------
+class ShoppingCart {
+private:
+    vector<Reservation> _reservations;
+
+public:
+    ShoppingCart();
+
+    Transaction confirm();
+    void addReservation(const Reservation& reservation);
+    bool removeReservation(int ID);
+    void viewShoppingCartItems() const;
+    void clear();
+    vector<Reservation> getReservations() const;
+};
+
+// --------- Sessions - abstract base ---------
+class SessionBase {
+protected:
+    time_t _createdAt;
+    time_t _lastTimeLogin;
+    SessionStatus _status;
+
+public:
+    SessionBase();
+    virtual ~SessionBase() = default;
+
+    virtual void load_session() = 0;
+    virtual void save_session() = 0;
+    virtual void login(const string& identifier, const string& password) = 0;
+    virtual void logout() = 0;
+
+    // getters / setters
+    time_t get_created_at() const { return _createdAt; }
+    time_t get_last_login() const { return _lastTimeLogin; }
+    SessionStatus get_status() const { return _status; }
+    void set_status(SessionStatus s) { _status = s; }
+};
+
+// Namespaced SessionManagers (Singletons)
+namespace StudentSession {
+    class SessionManager : public SessionBase {
+    private:
+        Student* _currentStudent;
+        ShoppingCart* _shopping_cart;
+        int _studentID;
+
+        SessionManager();
+        SessionManager(const SessionManager&) = delete;
+        SessionManager& operator=(const SessionManager&) = delete;
+
+    public:
+        static SessionManager& instance();
+        // overrides
+        void load_session() override;
+        void save_session() override;
+        void login(const string& identifier, const string& password) override;
+        void logout() override;
+
+        // helpers
+        Student* currentStudent() const;
+        ShoppingCart* shoppingCart() const;
+        // getters
+        int get_student_id() const { return _studentID; }
+    };
+} // namespace StudentSession
+
+namespace AdminSession {
+    class SessionManager : public SessionBase {
+    private:
+        Admin* _currentAdmin;
+        int _adminID;
+
+        SessionManager();
+        AdminSession::SessionManager(const AdminSession::SessionManager&) = delete;
+        AdminSession::SessionManager& operator=(const AdminSession::SessionManager&) = delete;
+
+    public:
+        static AdminSession::SessionManager& instance();
+        // overrides
+        void load_session() override;
+        void save_session() override;
+        void login(const string& identifier, const string& password) override;
+        void logout() override;
+
+        Admin* currentAdmin() const;
+        int get_admin_id() const { return _adminID; }
+    };
+} // namespace AdminSession
 
 //=================================================================================
 
@@ -259,14 +362,14 @@ string Admin::getType() const {
 Meal::Meal() {
     meal_id = 0;
     name = "";
-    price = 0.0;
+    price = 0.0f;
     meal_type = BREAKFAST;
     reserve_day = SATURDAY;
     isActive = false;
     side_items.clear();
 }
 //--------------------------------------
-void Meal::print() {
+void Meal::print() const {
     cout << "Meal ID: " << meal_id << endl;
     cout << "Name: " << name << endl;
     cout << "Price: " << price << endl;
@@ -304,13 +407,13 @@ void Meal::set_reserve_day(ReserveDay day) { reserve_day = day; }
 void Meal::activate() { isActive = true; }
 void Meal::deactivate() { isActive = false; }
 //--------------------------------------
-int Meal::get_meal_id() { return meal_id; }
-string Meal::get_name() { return name; }
-float Meal::get_price() { return price; }
-MealType Meal::get_meal_type() { return meal_type; }
-vector<string> Meal::get_side_items() { return side_items; }
-ReserveDay Meal::get_reserve_day() { return reserve_day; }
-bool Meal::is_active() { return isActive; }
+int Meal::get_meal_id() const { return meal_id; }
+string Meal::get_name() const { return name; }
+float Meal::get_price() const { return price; }
+MealType Meal::get_meal_type() const { return meal_type; }
+vector<string> Meal::get_side_items() const { return side_items; }
+ReserveDay Meal::get_reserve_day() const { return reserve_day; }
+bool Meal::is_active() const { return isActive; }
 
 // ------ DININGHALL::DININGHALL ------
 DiningHall::DiningHall() {
@@ -320,7 +423,7 @@ DiningHall::DiningHall() {
     capacity = 0;
 }
 //--------------------------------------
-void DiningHall::print() {
+void DiningHall::print() const {
     cout << "Dining Hall ID: " << hall_id << endl;
     cout << "Name: " << name << endl;
     cout << "Address: " << address << endl;
@@ -332,17 +435,73 @@ void DiningHall::set_name(const string& name) { this->name = name; }
 void DiningHall::set_address(const string& address) { this->address = address; }
 void DiningHall::set_capacity(int capacity) { this->capacity = capacity; }
 //--------------------------------------
-int DiningHall::get_hall_id() { return hall_id; }
-string DiningHall::get_name() { return name; }
-string DiningHall::get_address() { return address; }
-int DiningHall::get_capacity() { return capacity; }
+int DiningHall::get_hall_id() const { return hall_id; }
+string DiningHall::get_name() const { return name; }
+string DiningHall::get_address() const { return address; }
+int DiningHall::get_capacity() const { return capacity; }
+
+// ------ RESERVATION::RESERVATION ------
+Reservation::Reservation() {
+    reservation_id = 0;
+    student = nullptr;
+    meal = nullptr;
+    dHall = nullptr;
+    status = NOT_PAID;
+    created_at = time(nullptr);
+}
+//--------------------------------------
+void Reservation::set_reservation_id(int id) { reservation_id = id; }
+void Reservation::set_student(Student* s) { student = s; }
+void Reservation::set_meal(Meal* m) { meal = m; }
+void Reservation::set_dining_hall(DiningHall* d) { dHall = d; }
+void Reservation::set_status(RStatus s) { status = s; }
+void Reservation::set_created_at(time_t t) { created_at = t; }
+//--------------------------------------
+int Reservation::get_reservation_id() const { return reservation_id; }
+Student* Reservation::get_student() const { return student; }
+Meal* Reservation::get_meal() const { return meal; }
+DiningHall* Reservation::get_dining_hall() const { return dHall; }
+RStatus Reservation::get_status() const { return status; }
+time_t Reservation::get_created_at() const { return created_at; }
+//--------------------------------------
+bool Reservation::cancel() {
+    if (status == CANCELLED) return false;
+    status = CANCELLED;
+    return true;
+}
+//--------------------------------------
+void Reservation::print() const {
+    cout << "Reservation ID: " << reservation_id << endl;
+    cout << "Status: ";
+    switch (status) {
+    case SUCCESS: cout << "Success"; break;
+    case FAILED: cout << "Failed"; break;
+    case CANCELLED: cout << "Cancelled"; break;
+    case NOT_PAID: cout << "Not Paid"; break;
+    }
+    cout << endl;
+
+    cout << "Created At: " << ctime(&created_at);
+    if (student) {
+        cout << "--- Student Info ---" << endl;
+        student->print();
+    }
+    if (dHall) {
+        cout << "--- Dining Hall ---" << endl;
+        dHall->print();
+    }
+    if (meal) {
+        cout << "--- Meal Info ---" << endl;
+        meal->print();
+    }
+}
 
 // ------ STUDENT::STUDENT ------
 Student::Student() : User() {
     student_id = "";
     phone = "";
     isActive = false;
-    balance = 0.0;
+    balance = 0.0f;
     reservations.clear();
 }
 //--------------------------------------
@@ -402,7 +561,7 @@ bool Student::reserve_meal(Meal* meal, DiningHall* hall) {
     }
 
     Reservation new_res;
-    new_res.set_reservation_id(reservations.size() + 1);
+    new_res.set_reservation_id(static_cast<int>(reservations.size() + 1));
     new_res.set_student(this);
     new_res.set_meal(meal);
     new_res.set_dining_hall(hall);
@@ -437,67 +596,235 @@ bool Student::cancel_reservation(int reservation_id) {
     return false;
 }
 
-// ------ RESERVATION::RESERVATION ------
-Reservation::Reservation() {
-    reservation_id = 0;
-    student = nullptr;
-    meal = nullptr;
-    dHall = nullptr;
-    status = FAILED;
-    created_at = time(nullptr);
+// ------ TRANSACTION::TRANSACTION ------
+Transaction::Transaction() {
+    _transactionID = 0;
+    _trackingCode = "";
+    _amount = 0.0f;
+    _type = PAYMENT;
+    _status = PENDING;
+    _createdAt = time(nullptr);
 }
-//--------------------------------------
-void Reservation::set_reservation_id(int id) { reservation_id = id; }
-void Reservation::set_student(Student* s) { student = s; }
-void Reservation::set_meal(Meal* m) { meal = m; }
-void Reservation::set_dining_hall(DiningHall* d) { dHall = d; }
-void Reservation::set_status(RStatus s) { status = s; }
-void Reservation::set_created_at(time_t t) { created_at = t; }
-//--------------------------------------
-int Reservation::get_reservation_id() { return reservation_id; }
-Student* Reservation::get_student() { return student; }
-Meal* Reservation::get_meal() { return meal; }
-DiningHall* Reservation::get_dining_hall() { return dHall; }
-RStatus Reservation::get_status() { return status; }
-time_t Reservation::get_created_at() { return created_at; }
-//--------------------------------------
-bool Reservation::cancel() {
-    if (status == CANCELLED) return false;
-    status = CANCELLED;
-    return true;
-}
-//--------------------------------------
-void Reservation::print() {
-    cout << "Reservation ID: " << reservation_id << endl;
+// getters
+int Transaction::get_transaction_id() const { return _transactionID; }
+string Transaction::get_tracking_code() const { return _trackingCode; }
+float Transaction::get_amount() const { return _amount; }
+TransactionType Transaction::get_type() const { return _type; }
+TransactionStatus Transaction::get_status() const { return _status; }
+time_t Transaction::get_created_at() const { return _createdAt; }
+// setters
+void Transaction::set_transaction_id(int id) { _transactionID = id; }
+void Transaction::set_tracking_code(const string& code) { _trackingCode = code; }
+void Transaction::set_amount(float amount) { _amount = amount; }
+void Transaction::set_type(TransactionType t) { _type = t; }
+void Transaction::set_status(TransactionStatus s) { _status = s; }
+void Transaction::set_created_at(time_t t) { _createdAt = t; }
+
+void Transaction::print() const {
+    cout << "Transaction ID: " << _transactionID << endl;
+    cout << "Tracking: " << _trackingCode << endl;
+    cout << "Amount: " << _amount << endl;
     cout << "Status: ";
-    switch (status) {
-    case SUCCESS: cout << "Success"; break;
-    case FAILED: cout << "Failed"; break;
-    case CANCELLED: cout << "Cancelled"; break;
+    switch (_status) {
+    case PENDING: cout << "Pending"; break;
+    case COMPLETED: cout << "Completed"; break;
+    case FAILED_TX: cout << "Failed"; break;
     }
     cout << endl;
+    cout << "Created At: " << ctime(&_createdAt);
+}
 
-    cout << "Created At: " << ctime(&created_at);
-    if (student) {
-        cout << "--- Student Info ---" << endl;
-        student->print();
+// ------ SHOPPINGCART::SHOPPINGCART ------
+ShoppingCart::ShoppingCart() {
+    _reservations.clear();
+}
+
+Transaction ShoppingCart::confirm() {
+    Transaction tx;
+    tx.set_transaction_id(static_cast<int>(time(nullptr) % 100000));
+
+    tx.set_tracking_code("TRK" + to_string(tx.get_transaction_id()));
+    float sum = 0.0f;
+    for (auto& r : _reservations) {
+        if (r.get_meal()) sum += r.get_meal()->get_price();
     }
-    if (dHall) {
-        cout << "--- Dining Hall ---" << endl;
-        dHall->print();
+    tx.set_amount(sum);
+    tx.set_type(PAYMENT);
+    tx.set_status(PENDING);
+    tx.set_created_at(time(nullptr));
+
+    if (sum <= 0.0f) {
+        tx.set_status(FAILED_TX);
     }
-    if (meal) {
-        cout << "--- Meal Info ---" << endl;
-        meal->print();
+    else {
+        tx.set_status(COMPLETED);
+        for (auto& r : _reservations) {
+            r.set_status(SUCCESS);
+        }
+    }
+    return tx;
+}
+
+void ShoppingCart::addReservation(const Reservation& reservation) {
+    Reservation r = reservation;
+    r.set_status(NOT_PAID);
+    _reservations.push_back(r);
+}
+
+bool ShoppingCart::removeReservation(int ID) {
+    for (auto it = _reservations.begin(); it != _reservations.end(); ++it) {
+        if (it->get_reservation_id() == ID) {
+            _reservations.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void ShoppingCart::viewShoppingCartItems() const {
+    cout << "---- Shopping Cart Items (" << _reservations.size() << ") ----" << endl;
+    for (const auto& r : _reservations) {
+        r.print();
+        cout << "------------------" << endl;
     }
 }
+
+void ShoppingCart::clear() {
+    _reservations.clear();
+}
+
+vector<Reservation> ShoppingCart::getReservations() const {
+    return _reservations;
+}
+
+// ------ SESSIONS: SessionBase ------
+SessionBase::SessionBase() {
+    _createdAt = time(nullptr);
+    _lastTimeLogin = 0;
+    _status = ANONYMOUS;
+}
+
+// ------ StudentSession::SessionManager ------
+namespace StudentSession {
+    SessionManager::SessionManager() : _currentStudent(nullptr), _shopping_cart(nullptr), _studentID(0) {
+        _shopping_cart = new ShoppingCart();
+    }
+    SessionManager& SessionManager::instance() {
+        static SessionManager inst;
+        return inst;
+    }
+    void SessionManager::load_session() {
+        // stub: load saved session (not required to implement fully)
+    }
+    void SessionManager::save_session() {
+        // stub: save session
+    }
+    void SessionManager::login(const string& identifier, const string& password) {
+        // simple stub: in real project lookup student by identifier
+        // here we just mark session authenticated
+        _status = AUTHENTICATED;
+        _lastTimeLogin = time(nullptr);
+        // _currentStudent remains nullptr unless associated externally
+        cout << "StudentSession: logged in (" << identifier << ")" << endl;
+    }
+    void SessionManager::logout() {
+        _status = ANONYMOUS;
+        _lastTimeLogin = time(nullptr);
+        cout << "StudentSession: logged out" << endl;
+    }
+    Student* SessionManager::currentStudent() const {
+        return _currentStudent;
+    }
+    ShoppingCart* SessionManager::shoppingCart() const {
+        return _shopping_cart;
+    }
+} // namespace StudentSession
+
+// ------ AdminSession::SessionManager ------
+namespace AdminSession {
+    SessionManager::SessionManager() : _currentAdmin(nullptr), _adminID(0) {}
+    AdminSession::SessionManager& SessionManager::instance() {
+        static AdminSession::SessionManager inst;
+        return inst;
+    }
+    void SessionManager::load_session() {
+        // stub
+    }
+    void SessionManager::save_session() {
+        // stub
+    }
+    void SessionManager::login(const string& identifier, const string& password) {
+        _status = AUTHENTICATED;
+        _lastTimeLogin = time(nullptr);
+        cout << "AdminSession: logged in (" << identifier << ")" << endl;
+    }
+    void SessionManager::logout() {
+        _status = ANONYMOUS;
+        _lastTimeLogin = time(nullptr);
+        cout << "AdminSession: logged out" << endl;
+    }
+    Admin* SessionManager::currentAdmin() const {
+        return _currentAdmin;
+    }
+} // namespace AdminSession
+
+// ------ PANEL methods (empty skeletons) ------
+void Panel::Action(int) { /* stub */ }
+void Panel::showMenu() { /* stub */ }
+void Panel::showStudentInfo() { /* stub */ }
+void Panel::checkBalance() { /* stub */ }
+void Panel::viewReservations() { /* stub */ }
+void Panel::viewShoppingCart() { /* stub */ }
+void Panel::addToShoppingCart() { /* stub */ }
+void Panel::removeShoppingCartItem() { /* stub */ }
+void Panel::increaseBalance() { /* stub */ }
+void Panel::exit() { /* stub */ }
+
+//=================================================================================
 
 int main() {
 
+    Meal m;
+    m.set_meal_id(1);
+    m.set_name("Pasta");
+    m.set_price(30.0f);
+    m.activate();
 
+    DiningHall d;
+    d.set_hall_id(1);
+    d.set_name("Main Dining");
+    d.set_capacity(200);
 
+    Student s;
+    s.set_id(1);
+    s.set_name("Ali");
+    s.set_last_name("Hashemi");
+    s.set_email("ali@test.com");
+    s.set_phone("0912000000");
+    s.activate();
+    s.set_balance(100.0f);
 
+    Reservation r;
+    r.set_reservation_id(1);
+    r.set_student(&s);
+    r.set_meal(&m);
+    r.set_dining_hall(&d);
+    r.set_status(NOT_PAID);
+    r.set_created_at(time(nullptr));
 
+    ShoppingCart cart;
+    cart.addReservation(r);
 
+    cart.viewShoppingCartItems();
 
+    Transaction tx = cart.confirm();
+    tx.print();
+
+    cart.viewShoppingCartItems();
+
+    StudentSession::SessionManager::instance().login("ali@test.com", "password");
+    StudentSession::SessionManager::instance().shoppingCart()->addReservation(r);
+    StudentSession::SessionManager::instance().logout();
+
+    return 0;
 }
