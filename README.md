@@ -1,1 +1,0 @@
-"Seyyed Ali Moaven Hashemi"
