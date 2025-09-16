@@ -75,7 +75,6 @@ protected:
     string name;
     string lastName;
     string email;
-    // note: store only hashed password
     string hashedPassword;
 public:
     User();
@@ -85,7 +84,6 @@ public:
     string get_name() const;
     string get_last_name() const;
     string get_email() const;
-    // legacy-compatible getter (returns hashed)
     string get_password() const;
 
     virtual void print() const = 0;
@@ -97,19 +95,12 @@ public:
     void set_last_name(const string& _lastName);
     void set_email(const string& _email);
 
-    // Password utilities (Phase 4)
-    // setPassword hashes the plain password and stores the hash
     void setPassword(const string& password);
-    // check hashed password against input
     bool checkPassword(const string& password) const;
-    // set/get hashed directly
     void setHashedPassword(const string& hash);
     string getHashedPassword() const;
 
-    // maintain legacy names to avoid breaking code
     void set_password(const string& plain) { setPassword(plain); }
-    // get_password returns hashed for compatibility
-    // (prefer getHashedPassword)
     string get_password_legacy() const { return getHashedPassword(); }
 
     virtual ~User();
@@ -307,7 +298,6 @@ private:
 public:
     ShoppingCart();
 
-    // confirm now checks StudentSession balance and writes transaction log
     Transaction confirm();
     void addReservation(const Reservation& reservation);
     bool removeReservation(int ID);
