@@ -7,6 +7,8 @@
 #include <vector>
 #include <ctime>
 #include <iomanip>
+#include <thread>
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -16,12 +18,7 @@
 #include <unordered_map>
 #include <cctype>
 #include <limits>
-#include "LB/json.hpp"
-#if defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>
-#include <crypt.h>
-#endif
-using json = nlohmann::json;
+#include <chrono>
 using namespace std;
 namespace fs = std::filesystem;
 
@@ -46,7 +43,6 @@ public:
     fs::path c_students;    // data/users/students.csv
     fs::path c_admins;      // data/users/admins.csv
     fs::path c_dining;      // data/meals/dining.csv
-    // per-day files in meals_dir: saturday.csv ... wednesday.csv, thursday optional
 
     fs::path t_student_transactions;
     fs::path l_students_log_file;
@@ -60,12 +56,12 @@ public:
 private:
     ConfigPaths() {
         base_dir = "data";
-        users_dir = base_dir / "users";
+        users_dir = base_dir / "user";
         meals_dir = base_dir / "meals";
         logs_dir = base_dir / "logs";
         sessions_dir = base_dir / "sessions";
 
-        // ensure directories exist
+        // ensure directories exist (don't modify CSVs)
         try {
             fs::create_directories(users_dir);
             fs::create_directories(meals_dir);
@@ -74,11 +70,11 @@ private:
         }
         catch (...) {}
 
-        c_students = users_dir / "students.csv";
+        c_students = users_dir / "studentsCsvFile.csv"; // use your provided CSV filename
         c_admins = users_dir / "admins.csv";
         c_dining = meals_dir / "dining.csv";
 
-        t_student_transactions = logs_dir / "student_transactions.txt";
+        t_student_transactions = base_dir / "student_transactions.txt";
         l_students_log_file = logs_dir / "students.log";
         l_admins_log_file = logs_dir / "admins.log";
     }
@@ -133,7 +129,6 @@ static string mealTypeToString(MealType mt) {
 
 // Map uniDay (0..5) to filename
 static string dayFileName(int uniDay) {
-    // uni mapping user wanted: Saturday=0 ... Thursday=5, Friday off
     switch (uniDay) {
     case 0: return "saturday.csv";
     case 1: return "sunday.csv";
@@ -149,7 +144,11 @@ static string dayFileName(int uniDay) {
 static int get_university_day() {
     time_t now = time(nullptr);
     struct tm local_tm;
+#if defined(_WIN32) || defined(_WIN64)
     localtime_s(&local_tm, &now);
+#else
+    localtime_r(&now, &local_tm);
+#endif
     int wday = local_tm.tm_wday; // 0=Sunday ... 6=Saturday
     if (wday == 6) return 0; // Saturday
     if (wday == 0) return 1; // Sunday
@@ -157,12 +156,53 @@ static int get_university_day() {
     if (wday == 2) return 3; // Tuesday
     if (wday == 3) return 4; // Wednesday
     if (wday == 4) return 5; // Thursday
-    // Friday (5) -> off
     return FRIDAY_OFF;
 }
 
-// =========================== Classes ===========================
+// clear screen
+static void clear_screen() {
+#if defined(_WIN32) || defined(_WIN64)
+    system("cls");
+#else
+    // prefer ANSI clear
+    if (const char* term = getenv("TERM")) {
+        // use system clear for safety
+        system("clear");
+    }
+    else {
+        cout << string(100, '\n');
+    }
+#endif
+}
 
+// write log into data/logs/system.log
+static void write_log(const string& msg) {
+    fs::path logdir = ConfigPaths::instance().logs_dir; // data/logs as requested
+    try { fs::create_directories(logdir); }
+    catch (...) {}
+    fs::path logfile = logdir / "system.log";
+
+    ofstream fout(logfile, ios::app);
+    if (fout.is_open()) {
+        auto now = chrono::system_clock::now();
+        time_t tnow = chrono::system_clock::to_time_t(now);
+#if defined(_WIN32) || defined(_WIN64)
+        struct tm timeinfo;
+        localtime_s(&timeinfo, &tnow);
+        char buf[64];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        fout << "[" << buf << "] " << msg << "\n";
+#else
+        struct tm timeinfo;
+        localtime_r(&tnow, &timeinfo);
+        char buf[64];
+        strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+        fout << "[" << buf << "] " << msg << "\n";
+#endif
+    }
+}
+
+// =========================== Classes ===========================
 class User {
 protected:
     int id;
@@ -334,26 +374,39 @@ public:
     bool reserve_meal(Meal* meal, DiningHall* hall) {
         if (!is_active()) {
             cout << "Reservation failed: student is not active." << endl;
+            write_log("Reservation failed (student not active) for student id=" + to_string(id));
             return false;
         }
         if (!meal || !hall) {
-            cout << "Reservation failed: invalid meal or hall." << endl;
+            cout << "\033[1;31mReservation failed: invalid meal or hall.\033[0m" << endl;
+            write_log("Reservation failed (invalid meal/hall) student id=" + to_string(id));
             return false;
         }
         if (balance < meal->get_price()) {
-            cout << "Reservation failed: insufficient balance." << endl;
+            cout << "\033[1;31mReservation failed: insufficient balance.\033[0m" << endl;
+            write_log("Reservation failed (insufficient balance) student id=" + to_string(id));
             return false;
         }
-        // ensure one reservation per meal type per day
         time_t now = time(nullptr);
-        struct tm now_tm; localtime_s(&now_tm, &now);
+        struct tm now_tm;
+#if defined(_WIN32) || defined(_WIN64)
+        localtime_s(&now_tm, &now);
+#else
+        localtime_r(&now, &now_tm);
+#endif
         for (const auto& r : reservations) {
             if (r.get_status() == SUCCESS) {
                 time_t rt = r.get_created_at();
-                struct tm r_tm; localtime_s(&r_tm, &rt);
+                struct tm r_tm;
+#if defined(_WIN32) || defined(_WIN64)
+                localtime_s(&r_tm, &rt);
+#else
+                localtime_r(&rt, &r_tm);
+#endif
                 if (now_tm.tm_year == r_tm.tm_year && now_tm.tm_yday == r_tm.tm_yday) {
                     if (r.get_meal() && r.get_meal()->get_meal_type() == meal->get_meal_type()) {
                         cout << "Reservation failed: already reserved for this meal type today." << endl;
+                        write_log("Reservation failed (already reserved same meal type) student id=" + to_string(id));
                         return false;
                     }
                 }
@@ -367,7 +420,8 @@ public:
         nr.set_created_at(now);
         balance -= meal->get_price();
         reservations.push_back(nr);
-        cout << "Reservation successful! New balance: " << balance << endl;
+        cout << "\033[1;32mReservation successful! New balance: " << balance << "\033[0m\n" << endl;
+        write_log("Reservation success: student id=" + to_string(id) + " mealID=" + to_string(meal->get_meal_id()) + " hallID=" + to_string(hall->get_hall_id()));
         return true;
     }
 
@@ -376,15 +430,20 @@ public:
             if (r.get_reservation_id() == reservation_id) {
                 if (r.get_status() == CANCELLED) {
                     cout << "Cancellation failed: already cancelled." << endl;
+                    write_log("Cancellation failed (already cancelled) student id=" + to_string(id) + " resID=" + to_string(reservation_id));
                     return false;
                 }
-                if (r.get_meal()) balance += r.get_meal()->get_price();
+                if (r.get_meal()) {
+                    balance += r.get_meal()->get_price();
+                }
                 r.set_status(CANCELLED);
-                cout << "Reservation cancelled. Refund issued." << endl;
+                cout << "\033[1;32mReservation cancelled. Refund issued.\033[0m" << endl;
+                write_log("Reservation cancelled: student id=" + to_string(id) + " resID=" + to_string(reservation_id));
                 return true;
             }
         }
         cout << "Cancellation failed: reservation not found." << endl;
+        write_log("Cancellation failed (not found) student id=" + to_string(id) + " resID=" + to_string(reservation_id));
         return false;
     }
 };
@@ -429,6 +488,8 @@ namespace StudentSession {
     private:
         Student* current;
         SessionManager() : current(nullptr) {}
+        SessionManager(const SessionManager&) = delete;
+        SessionManager& operator=(const SessionManager&) = delete;
     public:
         static SessionManager& instance() {
             static SessionManager inst;
@@ -437,11 +498,14 @@ namespace StudentSession {
         Student* currentStudent() const { return current; }
 
         void login(const string& identifier, const string& password) {
-            // open students CSV, header-aware
+            // free existing if any
+            if (current) { delete current; current = nullptr; }
+
             fs::path students_csv = ConfigPaths::instance().c_students;
             ifstream fin(students_csv);
             if (!fin.is_open()) {
                 cout << "Student CSV not found at " << students_csv << " — cannot login." << endl;
+                write_log("Student login attempted but students CSV missing: " + students_csv.string());
                 return;
             }
             string header;
@@ -506,14 +570,14 @@ namespace StudentSession {
                     if (!s_hash.empty() && s_hash.rfind("$2", 0) == 0) {
 #if defined(__unix__) || defined(__APPLE__)
                         char* res = crypt(password.c_str(), s_hash.c_str());
-                        if (!res || s_hash != string(res)) { delete s; cout << "Student login failed: password mismatch (bcrypt)\n"; fin.close(); return; }
+                        if (!res || s_hash != string(res)) { delete s; cout << "Student login failed: password mismatch (bcrypt)\n"; fin.close(); write_log("Student login failed (bcrypt mismatch) for " + identifier); return; }
 #else
                         cout << "Student login: bcrypt hash detected but crypt() not available on this platform.\n";
-                        delete s; fin.close(); return;
+                        delete s; fin.close(); write_log("Student login failed (bcrypt not supported) for " + identifier); return;
 #endif
                     }
                     else {
-                        if (!s->checkPassword(password)) { delete s; cout << "Student login failed: password mismatch\n"; fin.close(); return; }
+                        if (!s->checkPassword(password)) { delete s; cout << "\033[1;31mEmail or password doesnt match our records!\033[0m\n"; this_thread::sleep_for(chrono::seconds(2)); fin.close(); write_log("Student login failed (password mismatch) for " + identifier); return; }
                     }
                 }
 
@@ -532,18 +596,29 @@ namespace StudentSession {
                 break;
             }
             fin.close();
-            if (!found) cout << "Email or password doesn’t match our records!\n";
+            if (!found) {
+                cout << "\033[1;31mEmail or password doesnt match our records!\033[0m\n";
+                write_log("Student login failed: identifier=" + identifier);
+                this_thread::sleep_for(chrono::seconds(2));
+            }
             else {
-                cout << "Student logged in: " << current->get_name() << " | balance: " << current->get_balance() << "\n";
+                cout << "\033[1;32mStudent loggin in: " << current->get_name() << " | balance: " << current->get_balance() << "\033[0m\n";
+                write_log("Student logged in: " + (current->get_email().empty() ? identifier : current->get_email()));
+                this_thread::sleep_for(chrono::seconds(1));
             }
         }
 
         void logout() {
             if (current) {
+                cout << "\033[1;32mStudent Signing out... \033[0m\n";
+                write_log("Student logged out: " + (current->get_email().empty() ? to_string(current->get_id()) : current->get_email()));
+                this_thread::sleep_for(chrono::seconds(1));
                 delete current;
                 current = nullptr;
             }
-            cout << "Student logged out\n";
+            else {
+                write_log("Student logout called but no student logged in");
+            }
         }
     };
 } // namespace StudentSession
@@ -554,6 +629,8 @@ namespace AdminSession {
     private:
         Admin* current;
         SessionManager() : current(nullptr) {}
+        SessionManager(const SessionManager&) = delete;
+        SessionManager& operator=(const SessionManager&) = delete;
     public:
         static SessionManager& instance() {
             static SessionManager inst;
@@ -562,9 +639,11 @@ namespace AdminSession {
         Admin* currentAdmin() const { return current; }
 
         void login(const string& identifier, const string& password) {
+            if (current) { delete current; current = nullptr; }
+
             fs::path admins_csv = ConfigPaths::instance().c_admins;
             ifstream fin(admins_csv);
-            if (!fin.is_open()) { cout << "Admin CSV not found\n"; return; }
+            if (!fin.is_open()) { cout << "Admin CSV not found\n"; write_log("Admin login attempted but admins CSV missing"); return; }
             string header; if (!getline(fin, header)) { cout << "Admin CSV empty\n"; fin.close(); return; }
             vector<string> headers = split_csv_line(header);
             unordered_map<string, int> idx;
@@ -578,7 +657,8 @@ namespace AdminSession {
             int idx_email = findIdx({ "email","mail" });
             int idx_hash = findIdx({ "hashedpassword","hashed_password","password","hash" });
 
-            string line; bool found = false;
+            string line;
+            bool found = false;
             while (getline(fin, line)) {
                 if (line.empty()) continue;
                 vector<string> cols = split_csv_line(line);
@@ -595,31 +675,34 @@ namespace AdminSession {
                     if (!hsh.empty() && hsh.rfind("$2", 0) == 0) {
 #if defined(__unix__) || defined(__APPLE__)
                         char* res = crypt(password.c_str(), hsh.c_str());
-                        if (!res || hsh != string(res)) { delete a; cout << "Admin login failed: bcrypt mismatch\n"; fin.close(); return; }
+                        if (!res || hsh != string(res)) { delete a; cout << "Admin login failed: bcrypt mismatch\n"; fin.close(); write_log("Admin login failed (bcrypt mismatch) for " + identifier); return; }
 #else
-                        cout << "Admin login: bcrypt hash present but crypt not available\n"; delete a; fin.close(); return;
+                        cout << "Admin login: bcrypt hash present but crypt not available\n"; delete a; fin.close(); write_log("Admin login failed (bcrypt not supported) for " + identifier); return;
 #endif
                     }
                     else {
-                        if (!a->checkPassword(password)) { delete a; cout << "Admin login failed: password mismatch\n"; fin.close(); return; }
+                        if (!a->checkPassword(password)) { delete a; cout << "\033[1;31mEmail or password doesnt match admin records!\033[0m\n"; this_thread::sleep_for(chrono::seconds(2)); fin.close(); write_log("Admin login failed (password mismatch) for " + identifier); return; }
                     }
                 }
                 current = a; found = true; break;
             }
             fin.close();
-            if (!found) cout << "Email or password doesn’t match admin records!\n";
-            else cout << "Admin logged in: " << current->get_name() << "\n";
+            if (!found) {
+                cout << "\033[1;31mEmail or password doesnt match admin records!\033[0m\n"; write_log("Admin login failed: " + identifier);
+                this_thread::sleep_for(chrono::seconds(2));
+            }
+            else { cout << "\033[1;32mAdmin logged in: " << current->get_name() << "\n"; write_log("Admin logged in: \033[0m" + current->get_email()); this_thread::sleep_for(chrono::seconds(1)); }
         }
 
         void logout() {
-            if (current) { delete current; current = nullptr; }
-            cout << "Admin logged out\n";
+            if (current) { write_log("Admin logged out: " + current->get_email()); delete current; current = nullptr; }
+            cout << "\033[1;32mAdmin Signing out...\033[0m\n";
+            this_thread::sleep_for(chrono::seconds(1));
         }
     };
 } // namespace AdminSession
 
 // ========== Demo creator & loaders ==========
-
 void ensure_demo_files() {
     fs::path students_csv = ConfigPaths::instance().c_students;
     if (!fs::exists(students_csv)) {
@@ -628,6 +711,7 @@ void ensure_demo_files() {
         fout << "0,4022604305,Ali,Hashemi," << User::simpleHash("1234")
             << ",ali@example.com,09651065286,20000\n";
         fout.close();
+        write_log("Created demo students CSV: " + students_csv.string());
         cout << "Created demo students file: " << students_csv << endl;
     }
 
@@ -638,6 +722,7 @@ void ensure_demo_files() {
         fout << "id,name,lastName,email,hashedPassword\n";
         fout << "1,Admin,User,admin@example.com," << User::simpleHash("admin") << "\n";
         fout.close();
+        write_log("Created demo admins CSV: " + admins_csv.string());
         cout << "Created demo admins file: " << admins_csv << endl;
     }
 
@@ -649,13 +734,12 @@ void ensure_demo_files() {
         fout << "1,AmirAbaad,200,AmirAbaad\n";
         fout << "2,Shokat_BrosPardis,150,Shokat_BrosPardis\n";
         fout.close();
+        write_log("Created demo dining CSV: " + dining_csv.string());
         cout << "Created demo dining file: " << dining_csv << endl;
     }
 
     // per-day meal files: saturday..thursday
     vector<pair<string, vector<pair<int, pair<string, int>>>>> demoDays;
-    // For simplicity, each item: day filename, vector of (id, (name, price))
-    // We'll create same two meals for each day as example
     demoDays.push_back({ "saturday.csv", {{1, {"ZereshkPolo_Morq",15000}}, {2, {"Khorsh_Bamiye",12000}}} });
     demoDays.push_back({ "sunday.csv",   {{1, {"KababKobide",15000}}, {2, {"Stanboli",12000}}} });
     demoDays.push_back({ "monday.csv",   {{1, {"TonMahi",15000}}, {2, {"Khoresh_Qeyme",12000}}} });
@@ -672,11 +756,12 @@ void ensure_demo_files() {
                 fout << it.first << "," << it.second.first << "," << it.second.second << ",Lunch\n";
             }
             fout.close();
+            write_log("Created demo meal file: " + p.string());
             cout << "Created demo meal file: " << p << endl;
         }
     }
 
-    // logs and tx file (touch)
+    // tx file (touch)
     fs::path tx = ConfigPaths::instance().t_student_transactions;
     if (!fs::exists(tx)) {
         ofstream fout(tx); fout.close();
@@ -686,10 +771,7 @@ void ensure_demo_files() {
 void load_today_meals_into_storage() {
     Storage::instance().clearMeals();
     int uniDay = get_university_day();
-    if (uniDay == FRIDAY_OFF) {
-        // no meals
-        return;
-    }
+    if (uniDay == FRIDAY_OFF) return;
     string fname = dayFileName(uniDay);
     if (fname.empty()) return;
     fs::path p = ConfigPaths::instance().meals_dir / fname;
@@ -747,7 +829,6 @@ bool admin_append_meal_to_day(int uniDay, const string& name, float price, const
     string fname = dayFileName(uniDay);
     if (fname.empty()) return false;
     fs::path p = ConfigPaths::instance().meals_dir / fname;
-    // find next ID by scanning file
     int nextId = 1;
     if (fs::exists(p)) {
         ifstream fin(p);
@@ -767,7 +848,6 @@ bool admin_append_meal_to_day(int uniDay, const string& name, float price, const
         fin.close();
     }
     else {
-        // create with header
         ofstream fout(p);
         fout << "mealID,name,price,type\n";
         fout.close();
@@ -776,6 +856,7 @@ bool admin_append_meal_to_day(int uniDay, const string& name, float price, const
     if (!fout.is_open()) { cout << "Failed to open " << p << " for append\n"; return false; }
     fout << nextId << "," << name << "," << price << "," << typeStr << "\n";
     fout.close();
+    write_log("Admin added meal id=" + to_string(nextId) + " to " + p.string());
     cout << "Added meal to " << p << " with id " << nextId << "\n";
     return true;
 }
@@ -805,11 +886,13 @@ bool admin_remove_meal_from_day(int uniDay, int mealId) {
         outLines.push_back(line);
     }
     fin.close();
-    // rewrite
     ofstream fout(p, ios::trunc);
     for (auto& l : outLines) fout << l << "\n";
     fout.close();
-    if (removed) cout << "Removed meal " << mealId << " from " << p << "\n";
+    if (removed) {
+        write_log("Admin removed meal id=" + to_string(mealId) + " from " + p.string());
+        cout << "Removed meal " << mealId << " from " << p << "\n";
+    }
     else cout << "Meal id not found in " << p << "\n";
     return removed;
 }
@@ -841,6 +924,7 @@ bool admin_append_hall(const string& name, int capacity, const string& address) 
     if (!fout.is_open()) { cout << "Failed to open " << p << "\n"; return false; }
     fout << nextId << "," << name << "," << capacity << "," << address << "\n";
     fout.close();
+    write_log("Admin added dining hall id=" + to_string(nextId));
     cout << "Added dining hall id=" << nextId << "\n";
     return true;
 }
@@ -870,7 +954,10 @@ bool admin_remove_hall(int hallId) {
     ofstream fout(p, ios::trunc);
     for (auto& l : out) fout << l << "\n";
     fout.close();
-    if (removed) cout << "Removed hall id=" << hallId << "\n";
+    if (removed) {
+        write_log("Admin removed dining hall id=" + to_string(hallId));
+        cout << "Removed hall id=" << hallId << "\n";
+    }
     else cout << "Hall id not found\n";
     return removed;
 }
@@ -880,7 +967,8 @@ void admin_panel_loop() {
     if (!AdminSession::SessionManager::instance().currentAdmin()) { cout << "No admin logged in\n"; return; }
     int opt = 0;
     do {
-        cout << "\n==== Admin Panel ====\n";
+        clear_screen();
+        cout << "\n\033[1;34m==== Admin Panel ====\033[0m\n";
         cout << "1) Show today's meals\n";
         cout << "2) Add meal for a day\n";
         cout << "3) Remove meal from a day\n";
@@ -890,7 +978,7 @@ void admin_panel_loop() {
         cout << "7) Refresh storage (reload today's meals & halls)\n";
         cout << "8) Logout admin\n";
         cout << "Choose: ";
-        if (!(cin >> opt)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid\n"; continue; }
+        if (!(cin >> opt)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "\033[1;31mInvalid\033[0m\n"; continue; }
         if (opt == 1) {
             int uniDay = get_university_day();
             if (uniDay == FRIDAY_OFF) {
@@ -906,30 +994,35 @@ void admin_panel_loop() {
                     for (auto& m : meals) m.print();
                 }
             }
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 2) {
             cout << "Which day? (0=Saturday,1=Sunday,2=Monday,3=Tuesday,4=Wednesday,5=Thursday): ";
             int d; cin >> d;
-            if (d < 0 || d>5) { cout << "Invalid day\n"; continue; }
+            if (d < 0 || d>5) { cout << "Invalid day\n"; cin.ignore(); cin.get(); continue; }
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
             cout << "Meal name (no comma): "; string name; getline(cin, name);
             cout << "Price (integer): "; int price; cin >> price;
             cout << "Type (Breakfast/Lunch/Dinner): "; string type; cin >> ws; getline(cin, type);
             if (admin_append_meal_to_day(d, name, (float)price, type)) {
                 cout << "Added.\n";
+                write_log("Admin added meal " + name + " day=" + to_string(d));
             }
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 3) {
             cout << "Which day to remove from? (0=Sat..5=Thu): "; int d; cin >> d;
-            if (d < 0 || d>5) { cout << "Invalid\n"; continue; }
+            if (d < 0 || d>5) { cout << "Invalid\n"; cin.ignore(); cin.get(); continue; }
             cout << "Enter mealID to remove: "; int mid; cin >> mid;
             admin_remove_meal_from_day(d, mid);
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 4) {
             load_halls_into_storage();
             auto& h = Storage::instance().getHalls();
             if (h.empty()) cout << "No dining halls\n";
             else for (auto& hh : h) hh.print();
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 5) {
             cin.ignore(numeric_limits<streamsize>::max(), '\n');
@@ -937,15 +1030,18 @@ void admin_panel_loop() {
             cout << "Capacity: "; int cap; cin >> cap; cin.ignore(numeric_limits<streamsize>::max(), '\n');
             cout << "Address: "; string addr; getline(cin, addr);
             admin_append_hall(name, cap, addr);
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 6) {
             cout << "Enter hallID to remove: "; int hid; cin >> hid;
             admin_remove_hall(hid);
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 7) {
             load_halls_into_storage();
             load_today_meals_into_storage();
             cout << "Reloaded storage from CSVs\n";
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 8) {
             AdminSession::SessionManager::instance().logout();
@@ -958,39 +1054,46 @@ void admin_panel_loop() {
 void student_panel_loop() {
     Student* cur = StudentSession::SessionManager::instance().currentStudent();
     if (!cur) { cout << "No student logged in\n"; return; }
-    // ensure student active (quick fix requested)
     if (!cur->is_active()) cur->activate();
 
-    // load today's meals & halls
     load_halls_into_storage();
     load_today_meals_into_storage();
 
-    cout << "\nWelcome " << cur->get_name() << " | Balance: " << cur->get_balance() << "\n";
-
     int opt = 0;
     do {
-        cout << "\n--- Student Menu ---\n";
+        clear_screen();
+        cout << "\n\033[1;32mWelcome " << cur->get_name() << " | Balance: " << cur->get_balance() << "\033[0m\n";
+        cout << "\n\033[1;34m--- Student Menu ---\033[0m\n";
         cout << "1) View Today's Meals\n";
         cout << "2) View Dining Halls\n";
         cout << "3) Reserve a Meal\n";
         cout << "4) View Reservations\n";
         cout << "5) Increase Balance\n";
         cout << "6) Logout\n";
+        cout << "7) Cancel a Reservation\n";
         cout << "Choose: ";
         if (!(cin >> opt)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid\n"; continue; }
         if (opt == 1) {
             int uniDay = get_university_day();
-            if (uniDay == FRIDAY_OFF) { cout << "Today is Friday — no meals.\n"; continue; }
-            auto& meals = Storage::instance().getMeals();
-            if (meals.empty()) { cout << "No meals today.\n"; continue; }
-            cout << "Meals for today:\n";
-            for (auto& m : meals) m.print();
+            if (uniDay == FRIDAY_OFF) { cout << "Today is Friday — no meals.\n"; }
+            else {
+                auto& meals = Storage::instance().getMeals();
+                if (meals.empty()) { cout << "No meals today.\n"; }
+                else {
+                    cout << "Meals for today:\n";
+                    for (auto& m : meals) m.print();
+                }
+            }
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 2) {
             auto& halls = Storage::instance().getHalls();
-            if (halls.empty()) { cout << "No dining halls\n"; continue; }
-            cout << "Dining Halls:\n";
-            for (auto& h : halls) h.print();
+            if (halls.empty()) { cout << "No dining halls\n"; }
+            else {
+                cout << "Dining Halls:\n";
+                for (auto& h : halls) h.print();
+            }
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 3) {
             int mealId, hallId;
@@ -998,22 +1101,35 @@ void student_panel_loop() {
             cout << "Enter hallID: "; cin >> hallId;
             Meal* m = Storage::instance().findMealByID(mealId);
             DiningHall* h = Storage::instance().findHallByID(hallId);
-            if (!m) { cout << "Meal not found\n"; continue; }
-            if (!h) { cout << "Hall not found\n"; continue; }
-            cur->reserve_meal(m, h);
+            if (!m) { cout << "Meal not found\n"; cout << "Press ENTER to continue..."; cin.ignore(); cin.get(); continue; }
+            if (!h) { cout << "Hall not found\n"; cout << "Press ENTER to continue..."; cin.ignore(); cin.get(); continue; }
+            bool ok = cur->reserve_meal(m, h);
+            if (!ok) {
+                cout << "Reservation failed.\n";
+            }
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 4) {
             auto rs = cur->get_reservations();
             if (rs.empty()) cout << "No reservations\n";
             else for (auto& r : rs) r.print();
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 5) {
             cout << "Amount to add: "; float amt; cin >> amt; cur->set_balance(cur->get_balance() + amt);
             cout << "Balance updated: " << cur->get_balance() << "\n";
+            write_log("Student balance increased: id=" + to_string(cur->get_id()) + " amount=" + to_string(amt));
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
         else if (opt == 6) {
             StudentSession::SessionManager::instance().logout();
             break;
+        }
+        else if (opt == 7) {
+            cout << "Enter reservation ID to cancel: "; int rid; cin >> rid;
+            bool ok = cur->cancel_reservation(rid);
+            if (!ok) cout << "Cancel failed.\n";
+            cout << "Press ENTER to continue..."; cin.ignore(); cin.get();
         }
     } while (opt != 6);
 }
@@ -1021,6 +1137,8 @@ void student_panel_loop() {
 // ========== Main ==========
 int main() {
     cout << "Reservation System - Phase 4\n";
+
+    // ensure demo files exist (only creates if missing)
     ensure_demo_files();
 
     // initial load
@@ -1028,20 +1146,24 @@ int main() {
     load_today_meals_into_storage();
 
     while (true) {
-        cout << "\n=== Main Menu ===\n";
+        clear_screen();
+        cout << "\n\033[1;32m=== Main Menu ===\033[0m\n";
         cout << "1) Student Login\n";
         cout << "2) Admin Login\n";
         cout << "3) Exit\n";
         cout << "Choose: ";
         int ch;
-        if (!(cin >> ch)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid input\n"; continue; }
+        if (!(cin >> ch)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "\033[1;31mInvalid input!\033[0m\n"; this_thread::sleep_for(chrono::seconds(1)); continue; }
         if (ch == 1) {
-            cout << "Enter email or studentID: "; string id; cin >> id;
-            cout << "Enter password: "; string pw; cin >> pw;
+            cout << "Enter email or studentID: ";
+            string id; cin >> id;
+            cout << "Enter password: ";
+            string pw; cin >> pw;
             StudentSession::SessionManager::instance().login(id, pw);
             if (StudentSession::SessionManager::instance().currentStudent()) {
                 student_panel_loop();
             }
+            // after return go back to main
         }
         else if (ch == 2) {
             cout << "Enter admin email: "; string em; cin >> em;
@@ -1053,10 +1175,12 @@ int main() {
         }
         else if (ch == 3) {
             cout << "Bye\n";
+            write_log("Exited program via main menu");
             break;
         }
         else {
-            cout << "Invalid option\n";
+            cout << "\033[1;31mInvalid option!\033[0m\n";
+            this_thread::sleep_for(chrono::seconds(1));
         }
     }
 
