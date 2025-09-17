@@ -16,12 +16,12 @@
 #include <unordered_map>
 #include <cctype>
 #include <limits>
-
+#include "LB/json.hpp"
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #include <crypt.h>
 #endif
-
+using json = nlohmann::json;
 using namespace std;
 namespace fs = std::filesystem;
 
