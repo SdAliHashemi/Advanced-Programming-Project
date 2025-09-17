@@ -6,17 +6,27 @@
 #include <string>
 #include <vector>
 #include <ctime>
-#include <iomanip> // for setw if needed
+#include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
-#include <functional> // placeholder hashing
 #include <filesystem>
+#include <stdexcept>
+#include <memory>
+#include <unordered_map>
+#include <cctype>
+#include <limits>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#include <crypt.h>
+#endif
+
 using namespace std;
 namespace fs = std::filesystem;
 
 // ======= Enums =======
-enum ReserveDay { SATURDAY, SUNDAY, MONDAY, TUESDAY, WEDNESDAY };
+enum ReserveDay { SATURDAY = 0, SUNDAY = 1, MONDAY = 2, TUESDAY = 3, WEDNESDAY = 4, THURSDAY = 5, FRIDAY_OFF = -1 };
 enum MealType { BREAKFAST, LUNCH, DINNER };
 enum RStatus { SUCCESS, FAILED, CANCELLED, NOT_PAID };
 
@@ -24,25 +34,20 @@ enum TransactionType { TRANSFER, PAYMENT };
 enum TransactionStatus { PENDING, COMPLETED, FAILED_TX };
 enum SessionStatus { AUTHENTICATED, ANONYMOUS };
 
-// =========================== Classes! ===========================
-
-// ------------- Declarations -------------
-class Meal;
-class DiningHall;
-class Student;
-class Reservation;
-class ShoppingCart;
-class Transaction;
-class SessionBase;
-
-// --------- ConfigPaths (singleton) ---------
+// =========================== ConfigPaths ===========================
 class ConfigPaths {
 public:
-    fs::path c_students;
-    fs::path c_admins;
-    fs::path c_meals;
-    fs::path c_dininghalls;
-    fs::path session_dir;
+    fs::path base_dir;
+    fs::path users_dir;
+    fs::path meals_dir;
+    fs::path logs_dir;
+    fs::path sessions_dir;
+
+    fs::path c_students;    // data/users/students.csv
+    fs::path c_admins;      // data/users/admins.csv
+    fs::path c_dining;      // data/meals/dining.csv
+    // per-day files in meals_dir: saturday.csv ... wednesday.csv, thursday optional
+
     fs::path t_student_transactions;
     fs::path l_students_log_file;
     fs::path l_admins_log_file;
@@ -51,1225 +56,1012 @@ public:
         static ConfigPaths cfg;
         return cfg;
     }
+
 private:
     ConfigPaths() {
-        c_students = "students.csv";
-        c_admins = "admins.csv";
-        c_meals = "meals.csv";
-        c_dininghalls = "dining.csv";
-        session_dir = "sessions";
-        t_student_transactions = "student_transactions.txt";
-        l_students_log_file = "students.log";
-        l_admins_log_file = "admins.log";
-        // Ensure session dir exists
-        if (!fs::exists(session_dir)) {
-            fs::create_directories(session_dir);
+        base_dir = "data";
+        users_dir = base_dir / "users";
+        meals_dir = base_dir / "meals";
+        logs_dir = base_dir / "logs";
+        sessions_dir = base_dir / "sessions";
+
+        // ensure directories exist
+        try {
+            fs::create_directories(users_dir);
+            fs::create_directories(meals_dir);
+            fs::create_directories(logs_dir);
+            fs::create_directories(sessions_dir);
         }
+        catch (...) {}
+
+        c_students = users_dir / "students.csv";
+        c_admins = users_dir / "admins.csv";
+        c_dining = meals_dir / "dining.csv";
+
+        t_student_transactions = logs_dir / "student_transactions.txt";
+        l_students_log_file = logs_dir / "students.log";
+        l_admins_log_file = logs_dir / "admins.log";
     }
 };
 
-// --------- User ---------
+// =========================== Helpers ===========================
+static vector<string> split_csv_line(const string& line) {
+    vector<string> cols;
+    string cur;
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (c == '"') {
+            in_quotes = !in_quotes;
+        }
+        else if (c == ',' && !in_quotes) {
+            cols.push_back(cur);
+            cur.clear();
+        }
+        else {
+            cur.push_back(c);
+        }
+    }
+    cols.push_back(cur);
+    return cols;
+}
+
+static string trim_str(const string& s) {
+    size_t a = 0;
+    while (a < s.size() && isspace((unsigned char)s[a])) ++a;
+    size_t b = s.size();
+    while (b > a && isspace((unsigned char)s[b - 1])) --b;
+    return s.substr(a, b - a);
+}
+
+static MealType mealTypeFromString(const string& s) {
+    string t = s;
+    transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return (char)tolower(c); });
+    if (t.find("break") != string::npos || t.find("breakfast") != string::npos) return BREAKFAST;
+    if (t.find("din") != string::npos || t.find("dinner") != string::npos) return DINNER;
+    return LUNCH;
+}
+
+static string mealTypeToString(MealType mt) {
+    switch (mt) {
+    case BREAKFAST: return "Breakfast";
+    case LUNCH: return "Lunch";
+    case DINNER: return "Dinner";
+    }
+    return "Lunch";
+}
+
+// Map uniDay (0..5) to filename
+static string dayFileName(int uniDay) {
+    // uni mapping user wanted: Saturday=0 ... Thursday=5, Friday off
+    switch (uniDay) {
+    case 0: return "saturday.csv";
+    case 1: return "sunday.csv";
+    case 2: return "monday.csv";
+    case 3: return "tuesday.csv";
+    case 4: return "wednesday.csv";
+    case 5: return "thursday.csv";
+    default: return "";
+    }
+}
+
+// determine university day from system localtime
+static int get_university_day() {
+    time_t now = time(nullptr);
+    struct tm local_tm;
+    localtime_s(&local_tm, &now);
+    int wday = local_tm.tm_wday; // 0=Sunday ... 6=Saturday
+    // convert C-style wday to uniDay where Saturday=0
+    // C: 0=Sunday,1=Monday,2=Tuesday,3=Wednesday,4=Thursday,5=Friday,6=Saturday
+    if (wday == 6) return 0; // Saturday
+    if (wday == 0) return 1; // Sunday
+    if (wday == 1) return 2; // Monday
+    if (wday == 2) return 3; // Tuesday
+    if (wday == 3) return 4; // Wednesday
+    if (wday == 4) return 5; // Thursday
+    // Friday (5) -> off
+    return FRIDAY_OFF;
+}
+
+// =========================== Classes ===========================
+
 class User {
 protected:
     int id;
     string name;
     string lastName;
     string email;
-    // note: store only hashed password
     string hashedPassword;
 public:
-    User();
+    User() : id(0), name(""), lastName(""), email(""), hashedPassword("") {}
+    virtual ~User() {}
+    // getters / setters
+    void set_id(int _id) { id = _id; }
+    int get_id() const { return id; }
+    void set_name(const string& n) { name = n; }
+    string get_name() const { return name; }
+    void set_last_name(const string& ln) { lastName = ln; }
+    string get_last_name() const { return lastName; }
+    void set_email(const string& e) { email = e; }
+    string get_email() const { return email; }
+    void setHashedPassword(const string& hash) { hashedPassword = hash; }
+    string getHashedPassword() const { return hashedPassword; }
 
-    // Getters
-    int get_id() const;
-    string get_name() const;
-    string get_last_name() const;
-    string get_email() const;
-    // legacy-compatible getter (returns hashed)
-    string get_password() const;
+    static string simpleHash(const string& input) {
+        unsigned int hash = 0;
+        for (char c : input) {
+            hash = hash * 31 + static_cast<unsigned int>(c);
+        }
+        return to_string(hash);
+    }
+    void setPassword(const string& password) {
+        hashedPassword = simpleHash(password);
+    }
+    bool checkPassword(const string& password) const {
+        if (!hashedPassword.empty() && hashedPassword.rfind("$2", 0) == 0) {
+#if defined(__unix__) || defined(__APPLE__)
+            char* res = crypt(password.c_str(), hashedPassword.c_str());
+            if (res) return hashedPassword == string(res);
+#endif
+            return false;
+        }
+        return hashedPassword == simpleHash(password);
+    }
 
     virtual void print() const = 0;
     virtual string getType() const = 0;
-
-    // Setters
-    void set_id(int _id);
-    void set_name(const string& _name);
-    void set_last_name(const string& _lastName);
-    void set_email(const string& _email);
-
-    // Password utilities (Phase 4)
-    // setPassword hashes the plain password and stores the hash
-    void setPassword(const string& password);
-    // check hashed password against input
-    bool checkPassword(const string& password) const;
-    // set/get hashed directly
-    void setHashedPassword(const string& hash);
-    string getHashedPassword() const;
-
-    // maintain legacy names to avoid breaking code
-    void set_password(const string& plain) { setPassword(plain); }
-    // get_password returns hashed for compatibility
-    // (prefer getHashedPassword)
-    string get_password_legacy() const { return getHashedPassword(); }
-
-    virtual ~User();
 };
 
-// --------- Admin ---------
 class Admin : public User {
 public:
-    Admin();
-
-    void print() const override;
-    string getType() const override;
+    Admin() : User() {}
+    void print() const override {
+        cout << "[ADMIN] " << name << " " << lastName << " (id=" << id << ") email: " << email << endl;
+    }
+    string getType() const override { return "Admin"; }
 };
 
-// --------- Meal ---------
 class Meal {
 private:
     int meal_id;
     string name;
     float price;
     MealType meal_type;
-    vector<string> side_items;
-    ReserveDay reserve_day;
-    bool isActive;
-
+    bool active;
 public:
-    Meal();
-
-    void print() const;
-    void update_price(float new_price);
-    void add_side_item(const string& item);
-
-    // Setters
-    void set_meal_id(int id);
-    void set_name(const string& name);
-    void set_price(float price);
-    void set_meal_type(MealType type);
-    void set_reserve_day(ReserveDay day);
-    void activate();
-    void deactivate();
-
-    // Getters
-    int get_meal_id() const;
-    string get_name() const;
-    float get_price() const;
-    MealType get_meal_type() const;
-    vector<string> get_side_items() const;
-    ReserveDay get_reserve_day() const;
-    bool is_active() const;
+    Meal() : meal_id(0), name(""), price(0.0f), meal_type(LUNCH), active(false) {}
+    void set_meal_id(int id) { meal_id = id; }
+    int get_meal_id() const { return meal_id; }
+    void set_name(const string& n) { name = n; }
+    string get_name() const { return name; }
+    void set_price(float p) { price = p; }
+    float get_price() const { return price; }
+    void set_meal_type(MealType mt) { meal_type = mt; }
+    MealType get_meal_type() const { return meal_type; }
+    void activate() { active = true; }
+    void deactivate() { active = false; }
+    bool is_active() const { return active; }
+    void print() const {
+        cout << "MealID: " << meal_id << " | " << name << " | " << price << " | " << mealTypeToString(meal_type) << endl;
+    }
 };
 
-// --------- DiningHall ---------
 class DiningHall {
 private:
     int hall_id;
     string name;
     string address;
     int capacity;
-
 public:
-    DiningHall();
-    void print() const;
-
-    // Getters
-    int get_hall_id() const;
-    string get_name() const;
-    string get_address() const;
-    int get_capacity() const;
-
-    // Setters
-    void set_hall_id(int id);
-    void set_name(const string& name);
-    void set_address(const string& address);
-    void set_capacity(int capacity);
+    DiningHall() : hall_id(0), name(""), address(""), capacity(0) {}
+    void set_hall_id(int id) { hall_id = id; }
+    int get_hall_id() const { return hall_id; }
+    void set_name(const string& n) { name = n; }
+    string get_name() const { return name; }
+    void set_address(const string& a) { address = a; }
+    string get_address() const { return address; }
+    void set_capacity(int c) { capacity = c; }
+    int get_capacity() const { return capacity; }
+    void print() const {
+        cout << "HallID: " << hall_id << " | " << name << " | capacity: " << capacity;
+        if (!address.empty()) cout << " | address: " << address;
+        cout << endl;
+    }
 };
 
-// --------- Reservation ---------
 class Reservation {
 private:
     int reservation_id;
-    Student* student;
     Meal* meal;
-    DiningHall* dHall;
+    DiningHall* hall;
     RStatus status;
     time_t created_at;
-
 public:
-    Reservation();
-
-    // Setters
-    void set_reservation_id(int id);
-    void set_student(Student* s);
-    void set_meal(Meal* m);
-    void set_dining_hall(DiningHall* d);
-    void set_status(RStatus s);
-    void set_created_at(time_t t);
-
-    // Getters
-    int get_reservation_id() const;
-    Student* get_student() const;
-    Meal* get_meal() const;
-    DiningHall* get_dining_hall() const;
-    RStatus get_status() const;
-    time_t get_created_at() const;
-
-    // Methods
-    bool cancel();
-    void print() const;
+    Reservation() : reservation_id(0), meal(nullptr), hall(nullptr), status(NOT_PAID), created_at(time(nullptr)) {}
+    void set_reservation_id(int id) { reservation_id = id; }
+    int get_reservation_id() const { return reservation_id; }
+    void set_meal(Meal* m) { meal = m; }
+    Meal* get_meal() const { return meal; }
+    void set_hall(DiningHall* h) { hall = h; }
+    DiningHall* get_hall() const { return hall; }
+    void set_status(RStatus s) { status = s; }
+    RStatus get_status() const { return status; }
+    void set_created_at(time_t t) { created_at = t; }
+    time_t get_created_at() const { return created_at; }
+    void print() const {
+        cout << "Reservation ID: " << reservation_id << " Status: ";
+        switch (status) {
+        case SUCCESS: cout << "Success"; break;
+        case FAILED: cout << "Failed"; break;
+        case CANCELLED: cout << "Cancelled"; break;
+        case NOT_PAID: cout << "Not Paid"; break;
+        }
+        cout << "\nCreated: " << ctime(&created_at);
+        if (meal) {
+            cout << " -> Meal: "; meal->print();
+        }
+        if (hall) {
+            cout << " -> Hall: "; hall->print();
+        }
+    }
 };
 
-// --------- Panel (Skeleton) ---------
-class Panel {
-public:
-    void Action(int);
-    void showMenu();
-    void showStudentInfo();
-    void checkBalance();
-    void viewReservations();
-    void viewShoppingCart();
-    void addToShoppingCart();
-    void removeShoppingCartItem();
-    void increaseBalance();
-    void exit();
-};
-
-// --------- Storage (Singleton) ---------
-class Storage {
-private:
-    int _mealIDCounter;
-    int _diningHallIDCounter;
-    vector<Meal> allMeals;
-    vector<DiningHall> allDiningHalls;
-
-    Storage() : _mealIDCounter(0), _diningHallIDCounter(0) {}
-    Storage(const Storage&) = delete;
-    Storage& operator=(const Storage&) = delete;
-
-public:
-    static Storage& instance() {
-        static Storage instance;
-        return instance;
-    }
-
-    vector<Meal>& getAllMeals() { return allMeals; }
-    vector<DiningHall>& getAllDiningHalls() { return allDiningHalls; }
-
-    int nextMealID() { return ++_mealIDCounter; }
-    int nextDiningHallID() { return ++_diningHallIDCounter; }
-
-    // management helpers required in Phase 4
-    void addMeal(const Meal& m);
-    void addDiningHall(const DiningHall& d);
-    void removeMeal(int id);
-    void removeDiningHall(int id);
-    void mealActivation(int id, bool active);
-    vector<Meal>::iterator findMeal(int id);
-    vector<DiningHall>::iterator findDiningHall(int id);
-};
-
-// --------- Transaction ---------
-class Transaction {
-private:
-    int _transactionID;
-    string _trackingCode;
-    float _amount;
-    TransactionType _type;
-    TransactionStatus _status;
-    time_t _createdAt;
-
-public:
-    Transaction();
-    // getters
-    int get_transaction_id() const;
-    string get_tracking_code() const;
-    float get_amount() const;
-    TransactionType get_type() const;
-    TransactionStatus get_status() const;
-    time_t get_created_at() const;
-    // setters
-    void set_transaction_id(int id);
-    void set_tracking_code(const string& code);
-    void set_amount(float amount);
-    void set_type(TransactionType t);
-    void set_status(TransactionStatus s);
-    void set_created_at(time_t t);
-
-    void print() const;
-};
-
-// --------- ShoppingCart ---------
-class ShoppingCart {
-private:
-    vector<Reservation> _reservations;
-
-public:
-    ShoppingCart();
-
-    // confirm now checks StudentSession balance and writes transaction log
-    Transaction confirm();
-    void addReservation(const Reservation& reservation);
-    bool removeReservation(int ID);
-    void viewShoppingCartItems() const;
-    void clear();
-    vector<Reservation> getReservations() const;
-};
-
-// --------- Sessions - abstract base ---------
-class SessionBase {
-protected:
-    time_t _createdAt;
-    time_t _lastTimeLogin;
-    SessionStatus _status;
-
-public:
-    SessionBase();
-    virtual ~SessionBase() = default;
-
-    virtual void load_session() = 0;
-    virtual void save_session() = 0;
-    virtual void login(const string& identifier, const string& password) = 0;
-    virtual void logout() = 0;
-
-    // getters / setters
-    time_t get_created_at() const { return _createdAt; }
-    time_t get_last_login() const { return _lastTimeLogin; }
-    SessionStatus get_status() const { return _status; }
-    void set_status(SessionStatus s) { _status = s; }
-};
-
-// Namespaced SessionManagers (Singletons)
-namespace StudentSession {
-    class SessionManager : public SessionBase {
-    private:
-        Student* _currentStudent;
-        ShoppingCart* _shopping_cart;
-        int _studentID;
-
-        SessionManager();
-        SessionManager(const SessionManager&) = delete;
-        SessionManager& operator=(const SessionManager&) = delete;
-
-    public:
-        static SessionManager& instance();
-        // overrides
-        void load_session() override;
-        void save_session() override;
-        void login(const string& identifier, const string& password) override;
-        void logout() override;
-
-        // helpers
-        Student* currentStudent() const;
-        ShoppingCart* shoppingCart() const;
-        // getters
-        int get_student_id() const { return _studentID; }
-
-        // setters
-        void setCurrentStudent(Student* s) { _currentStudent = s; }
-        void setShoppingCart(ShoppingCart* sc) { _shopping_cart = sc; }
-        void setStudentID(int id) { _studentID = id; }
-    };
-} // namespace StudentSession
-
-namespace AdminSession {
-    class SessionManager : public SessionBase {
-    private:
-        Admin* _currentAdmin;
-        int _adminID;
-
-        SessionManager();
-        AdminSession::SessionManager(const AdminSession::SessionManager&) = delete;
-        AdminSession::SessionManager& operator=(const AdminSession::SessionManager&) = delete;
-
-    public:
-        static AdminSession::SessionManager& instance();
-        // overrides
-        void load_session() override;
-        void save_session() override;
-        void login(const string& identifier, const string& password) override;
-        void logout() override;
-
-        Admin* currentAdmin() const;
-        int get_admin_id() const { return _adminID; }
-
-        // setters
-        void setCurrentAdmin(Admin* a) { _currentAdmin = a; }
-        void setAdminID(int id) { _adminID = id; }
-    };
-} // namespace AdminSession
-
-// --------- AdminPanel ---------
-class AdminPanel {
-public:
-    void chooseCsvFile(const fs::path& p);
-    void displayAllMeals();
-    void displayAllDiningHalls();
-    void addNewMealInteractive();
-    void addNewDiningHallInteractive();
-    void removeMeal(int id);
-    void mealActivation(int id, bool active);
-    void removeDiningHall(int id);
-    void showMenu();
-    void action(int opt);
-};
-
-//=================================================================================
-
-// ------ USER::USER ------
-User::User() : id(0), name(""), lastName(""), email(""), hashedPassword("") {}
-//--------------------------------------
-void User::set_id(int _id) { id = _id; }
-void User::set_name(const string& _name) { name = _name; }
-void User::set_last_name(const string& _lastName) { lastName = _lastName; }
-void User::set_email(const string& _email) { email = _email; }
-int User::get_id() const { return id; }
-string User::get_name() const { return name; }
-string User::get_last_name() const { return lastName; }
-string User::get_email() const { return email; }
-string User::get_password() const { return hashedPassword; }
-string User::getHashedPassword() const { return hashedPassword; }
-void User::setHashedPassword(const string& hash) { hashedPassword = hash; }
-//--------------------------------------
-// Placeholder hashing: replace with bcrypt/argon2 in production
-void User::setPassword(const string& password) {
-    hash<string> hasher;
-    hashedPassword = to_string(hasher(password));
-}
-bool User::checkPassword(const string& password) const {
-    hash<string> hasher;
-    return hashedPassword == to_string(hasher(password));
-}
-//--------------------------------------
-User::~User() {}
-
-// ------ ADMIN::ADMIN ------
-Admin::Admin() : User() {}
-//--------------------------------------
-void Admin::print() const {
-    cout << "[ADMIN]" << endl;
-    cout << "ID: " << id << endl;
-    cout << "Name: " << name << " " << lastName << endl;
-    cout << "Email: " << email << endl;
-}
-string Admin::getType() const { return "Admin"; }
-
-// ------ MEAL::MEAL ------
-Meal::Meal() {
-    meal_id = 0;
-    name = "";
-    price = 0.0f;
-    meal_type = BREAKFAST;
-    reserve_day = SATURDAY;
-    isActive = false;
-    side_items.clear();
-}
-void Meal::print() const {
-    cout << "Meal ID: " << meal_id << endl;
-    cout << "Name: " << name << endl;
-    cout << "Price: " << price << endl;
-    cout << "Type: ";
-    switch (meal_type) {
-    case BREAKFAST: cout << "Breakfast"; break;
-    case LUNCH: cout << "Lunch"; break;
-    case DINNER: cout << "Dinner"; break;
-    }
-    cout << "\nReserve Day: ";
-    switch (reserve_day) {
-    case SATURDAY: cout << "Saturday"; break;
-    case SUNDAY: cout << "Sunday"; break;
-    case MONDAY: cout << "Monday"; break;
-    case TUESDAY: cout << "Tuesday"; break;
-    case WEDNESDAY: cout << "Wednesday"; break;
-    }
-    cout << "\nStatus: " << (isActive ? "Active" : "Inactive") << endl;
-    cout << "Side Items: ";
-    for (const auto& item : side_items) cout << item << " ";
-    cout << endl;
-}
-void Meal::update_price(float new_price) { price = new_price; }
-void Meal::add_side_item(const string& item) { side_items.push_back(item); }
-void Meal::set_meal_id(int id) { meal_id = id; }
-void Meal::set_name(const string& name) { this->name = name; }
-void Meal::set_price(float price) { this->price = price; }
-void Meal::set_meal_type(MealType type) { meal_type = type; }
-void Meal::set_reserve_day(ReserveDay day) { reserve_day = day; }
-void Meal::activate() { isActive = true; }
-void Meal::deactivate() { isActive = false; }
-int Meal::get_meal_id() const { return meal_id; }
-string Meal::get_name() const { return name; }
-float Meal::get_price() const { return price; }
-MealType Meal::get_meal_type() const { return meal_type; }
-vector<string> Meal::get_side_items() const { return side_items; }
-ReserveDay Meal::get_reserve_day() const { return reserve_day; }
-bool Meal::is_active() const { return isActive; }
-
-// ------ DININGHALL::DININGHALL ------
-DiningHall::DiningHall() {
-    hall_id = 0;
-    name = "";
-    address = "";
-    capacity = 0;
-}
-void DiningHall::print() const {
-    cout << "Dining Hall ID: " << hall_id << endl;
-    cout << "Name: " << name << endl;
-    cout << "Address: " << address << endl;
-    cout << "Capacity: " << capacity << endl;
-}
-void DiningHall::set_hall_id(int id) { hall_id = id; }
-void DiningHall::set_name(const string& name) { this->name = name; }
-void DiningHall::set_address(const string& address) { this->address = address; }
-void DiningHall::set_capacity(int capacity) { this->capacity = capacity; }
-int DiningHall::get_hall_id() const { return hall_id; }
-string DiningHall::get_name() const { return name; }
-string DiningHall::get_address() const { return address; }
-int DiningHall::get_capacity() const { return capacity; }
-
-// ------ RESERVATION::RESERVATION ------
-Reservation::Reservation() {
-    reservation_id = 0;
-    student = nullptr;
-    meal = nullptr;
-    dHall = nullptr;
-    status = NOT_PAID;
-    created_at = time(nullptr);
-}
-void Reservation::set_reservation_id(int id) { reservation_id = id; }
-void Reservation::set_student(Student* s) { student = s; }
-void Reservation::set_meal(Meal* m) { meal = m; }
-void Reservation::set_dining_hall(DiningHall* d) { dHall = d; }
-void Reservation::set_status(RStatus s) { status = s; }
-void Reservation::set_created_at(time_t t) { created_at = t; }
-int Reservation::get_reservation_id() const { return reservation_id; }
-Student* Reservation::get_student() const { return student; }
-Meal* Reservation::get_meal() const { return meal; }
-DiningHall* Reservation::get_dining_hall() const { return dHall; }
-RStatus Reservation::get_status() const { return status; }
-time_t Reservation::get_created_at() const { return created_at; }
-bool Reservation::cancel() {
-    if (status == CANCELLED) return false;
-    status = CANCELLED;
-    return true;
-}
-void Reservation::print() const {
-    cout << "Reservation ID: " << reservation_id << endl;
-    cout << "Status: ";
-    switch (status) {
-    case SUCCESS: cout << "Success"; break;
-    case FAILED: cout << "Failed"; break;
-    case CANCELLED: cout << "Cancelled"; break;
-    case NOT_PAID: cout << "Not Paid"; break;
-    }
-    cout << endl;
-    cout << "Created At: " << ctime(&created_at);
-    if (student) {
-        cout << "--- Student Info ---" << endl;
-        student->print();
-    }
-    if (dHall) {
-        cout << "--- Dining Hall ---" << endl;
-        dHall->print();
-    }
-    if (meal) {
-        cout << "--- Meal Info ---" << endl;
-        meal->print();
-    }
-}
-
-// ------ STUDENT::STUDENT ------
-Student::Student() : User() {
-    // Student-specific initializations
-    // note: User ctor already ran
-    // student_id & phone are part of Student
-    // default values:
-    // student_id = ""; phone = ""; isActive=false; balance=0; reservations cleared
-    // We'll set them explicitly if needed in implementation section (below)
-}
-void Student::print() const {
-    cout << "[STUDENT]" << endl;
-    cout << "ID: " << id << endl;
-    cout << "Name: " << name << " " << lastName << endl;
-    cout << "Email: " << email << endl;
-    cout << "Phone: " << phone << endl;
-    cout << "Active: " << (isActive ? "Yes" : "No") << endl;
-    cout << "Reservations Count: " << reservations.size() << endl;
-}
-// getters/setters & actions implemented below (kept original style)
-
-// (We'll re-declare Student's members and methods to match previous file
-//  because in the original long file Student had its own private fields.)
-// To maintain the exact layout of your original file, put full Student definition here:
-
-// Rewriting Student class (to match your original longer version)
-class StudentFull : public User {
+class Student : public User {
 private:
     string student_id;
     string phone;
-    bool isActive;
+    bool active_flag;
     float balance;
     vector<Reservation> reservations;
-
 public:
-    StudentFull();
-    // overrides
-    void print() const override;
-    string getType() const override;
+    Student() : User(), student_id(""), phone(""), active_flag(false), balance(0.0f) {}
+    void set_student_id(const string& s) { student_id = s; }
+    string get_student_id() const { return student_id; }
+    void set_phone(const string& p) { phone = p; }
+    string get_phone() const { return phone; }
+    void activate() { active_flag = true; }
+    void deactivate() { active_flag = false; }
+    bool is_active() const { return active_flag; }
+    void set_balance(float b) { balance = b; }
+    float get_balance() const { return balance; }
+    vector<Reservation> get_reservations() const { return reservations; }
+    void add_reservation(const Reservation& r) { reservations.push_back(r); }
 
-    // setters
-    void set_student_id(const string& sid);
-    void set_phone(const string& p);
-    void activate();
-    void deactivate();
-    void set_balance(float b);
-
-    // getters
-    string get_student_id() const;
-    string get_phone() const;
-    bool is_active() const;
-    vector<Reservation> get_reserves() const;
-    float get_balance() const;
-
-    // actions
-    bool reserve_meal(Meal* meal, DiningHall* hall);
-    bool cancel_reservation(int reservation_id);
-};
-
-// For backwards-compatibility with rest of original code, we'll alias Student to StudentFull
-// (so other code that refers to class Student will still compile)
-typedef StudentFull Student;
-
-// Implement StudentFull methods (keeping same logic as your original code)
-StudentFull::StudentFull() : User() {
-    student_id = "";
-    phone = "";
-    isActive = false;
-    balance = 0.0f;
-    reservations.clear();
-}
-void StudentFull::print() const {
-    cout << "[STUDENT]" << endl;
-    cout << "ID: " << id << endl;
-    cout << "Name: " << name << " " << lastName << endl;
-    cout << "Email: " << email << endl;
-    cout << "Phone: " << phone << endl;
-    cout << "Active: " << (isActive ? "Yes" : "No") << endl;
-    cout << "Reservations Count: " << reservations.size() << endl;
-}
-string StudentFull::getType() const { return "Student"; }
-void StudentFull::set_student_id(const string& sid) { student_id = sid; }
-void StudentFull::set_phone(const string& p) { phone = p; }
-void StudentFull::activate() { isActive = true; }
-void StudentFull::deactivate() { isActive = false; }
-void StudentFull::set_balance(float b) { balance = b; }
-string StudentFull::get_student_id() const { return student_id; }
-string StudentFull::get_phone() const { return phone; }
-bool StudentFull::is_active() const { return isActive; }
-float StudentFull::get_balance() const { return balance; }
-vector<Reservation> StudentFull::get_reserves() const { return reservations; }
-
-bool StudentFull::reserve_meal(Meal* meal, DiningHall* hall) {
-    if (!isActive) {
-        cout << "Reservation failed: student is not active." << endl;
-        return false;
+    void print() const override {
+        cout << "[STUDENT] " << name << " " << lastName << " (id=" << id << ", student_id=" << student_id << ")\n";
+        cout << "email: " << email << " | phone: " << phone << " | balance: " << balance << " | active: " << (active_flag ? "yes" : "no") << endl;
     }
-    if (!meal || !hall) {
-        cout << "Reservation failed: invalid meal or hall." << endl;
-        return false;
-    }
-    if (balance < meal->get_price()) {
-        cout << "Reservation failed: insufficient balance." << endl;
-        return false;
-    }
-    time_t now = time(nullptr);
-    struct tm* now_tm = localtime(&now);
-    for (const auto& res : reservations) {
-        if (res.get_status() == SUCCESS) {
-            struct tm* res_tm = localtime(&res.get_created_at());
-            if (now_tm->tm_year == res_tm->tm_year &&
-                now_tm->tm_yday == res_tm->tm_yday &&
-                res.get_meal()->get_meal_type() == meal->get_meal_type()) {
-                cout << "Reservation failed: already reserved for this meal type today." << endl;
-                return false;
+    string getType() const override { return "Student"; }
+
+    bool reserve_meal(Meal* meal, DiningHall* hall) {
+        if (!is_active()) {
+            cout << "Reservation failed: student is not active." << endl;
+            return false;
+        }
+        if (!meal || !hall) {
+            cout << "Reservation failed: invalid meal or hall." << endl;
+            return false;
+        }
+        if (balance < meal->get_price()) {
+            cout << "Reservation failed: insufficient balance." << endl;
+            return false;
+        }
+        // ensure one reservation per meal type per day
+        time_t now = time(nullptr);
+        struct tm now_tm; localtime_s(&now_tm, &now);
+        for (const auto& r : reservations) {
+            if (r.get_status() == SUCCESS) {
+                time_t rt = r.get_created_at();
+                struct tm r_tm; localtime_s(&r_tm, &rt);
+                if (now_tm.tm_year == r_tm.tm_year && now_tm.tm_yday == r_tm.tm_yday) {
+                    if (r.get_meal() && r.get_meal()->get_meal_type() == meal->get_meal_type()) {
+                        cout << "Reservation failed: already reserved for this meal type today." << endl;
+                        return false;
+                    }
+                }
             }
         }
+        Reservation nr;
+        nr.set_reservation_id(static_cast<int>(reservations.size() + 1));
+        nr.set_meal(meal);
+        nr.set_hall(hall);
+        nr.set_status(SUCCESS);
+        nr.set_created_at(now);
+        balance -= meal->get_price();
+        reservations.push_back(nr);
+        cout << "Reservation successful! New balance: " << balance << endl;
+        return true;
     }
-    Reservation new_res;
-    new_res.set_reservation_id(static_cast<int>(reservations.size() + 1));
-    new_res.set_student(this);
-    new_res.set_meal(meal);
-    new_res.set_dining_hall(hall);
-    // per Phase 3/4, when created via reserve_meal we can set SUCCESS directly (assuming payment)
-    new_res.set_status(SUCCESS);
-    new_res.set_created_at(now);
-    balance -= meal->get_price();
-    reservations.push_back(new_res);
-    cout << "Reservation successful!" << endl;
+
+    bool cancel_reservation(int reservation_id) {
+        for (auto& r : reservations) {
+            if (r.get_reservation_id() == reservation_id) {
+                if (r.get_status() == CANCELLED) {
+                    cout << "Cancellation failed: already cancelled." << endl;
+                    return false;
+                }
+                if (r.get_meal()) balance += r.get_meal()->get_price();
+                r.set_status(CANCELLED);
+                cout << "Reservation cancelled. Refund issued." << endl;
+                return true;
+            }
+        }
+        cout << "Cancellation failed: reservation not found." << endl;
+        return false;
+    }
+};
+
+// ========== Storage Singleton ==========
+class Storage {
+private:
+    vector<Meal> meals; // today's meals loaded
+    vector<DiningHall> halls;
+    int nextMealId;
+    int nextHallId;
+    Storage() : nextMealId(1000), nextHallId(1000) {}
+public:
+    static Storage& instance() {
+        static Storage inst;
+        return inst;
+    }
+    // meals
+    vector<Meal>& getMeals() { return meals; }
+    void addMeal(const Meal& m) { meals.push_back(m); if (m.get_meal_id() >= nextMealId) nextMealId = m.get_meal_id() + 1; }
+    void clearMeals() { meals.clear(); }
+    int reserveNextMealID() { return nextMealId++; }
+    // halls
+    vector<DiningHall>& getHalls() { return halls; }
+    void addHall(const DiningHall& d) { halls.push_back(d); if (d.get_hall_id() >= nextHallId) nextHallId = d.get_hall_id() + 1; }
+    void clearHalls() { halls.clear(); }
+    int reserveNextHallID() { return nextHallId++; }
+
+    Meal* findMealByID(int id) {
+        for (auto& m : meals) if (m.get_meal_id() == id) return &m;
+        return nullptr;
+    }
+    DiningHall* findHallByID(int id) {
+        for (auto& h : halls) if (h.get_hall_id() == id) return &h;
+        return nullptr;
+    }
+};
+
+// ========== Session Manager for Student ==========
+namespace StudentSession {
+    class SessionManager {
+    private:
+        Student* current;
+        SessionManager() : current(nullptr) {}
+    public:
+        static SessionManager& instance() {
+            static SessionManager inst;
+            return inst;
+        }
+        Student* currentStudent() const { return current; }
+
+        void login(const string& identifier, const string& password) {
+            // open students CSV, header-aware
+            fs::path students_csv = ConfigPaths::instance().c_students;
+            ifstream fin(students_csv);
+            if (!fin.is_open()) {
+                cout << "Student CSV not found at " << students_csv << " — cannot login." << endl;
+                return;
+            }
+            string header;
+            if (!getline(fin, header)) { cout << "Student CSV empty\n"; fin.close(); return; }
+            vector<string> headers = split_csv_line(header);
+            unordered_map<string, int> idx;
+            for (size_t i = 0; i < headers.size(); ++i) {
+                string h = trim_str(headers[i]);
+                transform(h.begin(), h.end(), h.begin(), [](unsigned char c) { return (char)tolower(c); });
+                idx[h] = static_cast<int>(i);
+            }
+            auto findIdx = [&](initializer_list<string> names)->int {
+                for (auto& n : names) {
+                    string low = n; transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return (char)tolower(c); });
+                    if (idx.find(low) != idx.end()) return idx[low];
+                }
+                return -1;
+                };
+            int idx_studentid = findIdx({ "studentid","student_id","userid","userID","id" });
+            int idx_name = findIdx({ "name","fullname","first_name" });
+            int idx_last = findIdx({ "lastname","last_name","family","surname" });
+            int idx_hash = findIdx({ "hashpassword","hashedpassword","password","hash","hashpassword" });
+            int idx_email = findIdx({ "email","mail" });
+            int idx_phone = findIdx({ "phone","mobile","tel" });
+            int idx_active = findIdx({ "active","isactive","activated" });
+
+            string line;
+            bool found = false;
+            while (getline(fin, line)) {
+                if (line.empty()) continue;
+                vector<string> cols = split_csv_line(line);
+                auto getVal = [&](int idxx)->string {
+                    if (idxx >= 0 && idxx < (int)cols.size()) return trim_str(cols[idxx]);
+                    return string();
+                    };
+                string s_studentid = getVal(idx_studentid);
+                string s_email = getVal(idx_email);
+                string s_hash = getVal(idx_hash);
+
+                bool match = false;
+                if (identifier.find('@') != string::npos) {
+                    if (!s_email.empty() && s_email == identifier) match = true;
+                }
+                else {
+                    if (!s_studentid.empty() && s_studentid == identifier) match = true;
+                    if (!match && !cols.empty() && trim_str(cols[0]) == identifier) match = true;
+                }
+                if (!match) continue;
+
+                // construct student
+                Student* s = new Student();
+                if (!s_studentid.empty()) { try { s->set_id(stoi(s_studentid)); } catch (...) {} s->set_student_id(s_studentid); }
+                string nm = getVal(idx_name); if (!nm.empty()) s->set_name(nm);
+                string ln = getVal(idx_last); if (!ln.empty()) s->set_last_name(ln);
+                string ph = getVal(idx_phone); if (!ph.empty()) s->set_phone(ph);
+                string bal = getVal(findIdx({ "balance","wallet","credit" }));
+                if (!bal.empty()) { try { s->set_balance(stof(bal)); } catch (...) {} }
+                if (!s_hash.empty()) s->setHashedPassword(s_hash);
+
+                // check password
+                if (!password.empty()) {
+                    if (!s_hash.empty() && s_hash.rfind("$2", 0) == 0) {
+#if defined(__unix__) || defined(__APPLE__)
+                        char* res = crypt(password.c_str(), s_hash.c_str());
+                        if (!res || s_hash != string(res)) { delete s; cout << "Student login failed: password mismatch (bcrypt)\n"; fin.close(); return; }
+#else
+                        cout << "Student login: bcrypt hash detected but crypt() not available on this platform.\n";
+                        delete s; fin.close(); return;
+#endif
+                    }
+                    else {
+                        if (!s->checkPassword(password)) { delete s; cout << "Student login failed: password mismatch\n"; fin.close(); return; }
+                    }
+                }
+
+                // active flag from CSV optional
+                string act = getVal(idx_active);
+                if (!act.empty()) {
+                    if (act == "1" || act == "true" || act == "yes") s->activate();
+                }
+                else {
+                    // default: activate upon login (quick fix requested)
+                    s->activate();
+                }
+
+                current = s;
+                found = true;
+                break;
+            }
+            fin.close();
+            if (!found) cout << "Email or password doesn’t match our records!\n";
+            else {
+                cout << "Student logged in: " << current->get_name() << " | balance: " << current->get_balance() << "\n";
+            }
+        }
+
+        void logout() {
+            if (current) {
+                delete current;
+                current = nullptr;
+            }
+            cout << "Student logged out\n";
+        }
+    };
+} // namespace StudentSession
+
+// ========== Admin session ==========
+namespace AdminSession {
+    class SessionManager {
+    private:
+        Admin* current;
+        SessionManager() : current(nullptr) {}
+    public:
+        static SessionManager& instance() {
+            static SessionManager inst;
+            return inst;
+        }
+        Admin* currentAdmin() const { return current; }
+
+        void login(const string& identifier, const string& password) {
+            fs::path admins_csv = ConfigPaths::instance().c_admins;
+            ifstream fin(admins_csv);
+            if (!fin.is_open()) { cout << "Admin CSV not found\n"; return; }
+            string header; if (!getline(fin, header)) { cout << "Admin CSV empty\n"; fin.close(); return; }
+            vector<string> headers = split_csv_line(header);
+            unordered_map<string, int> idx;
+            for (size_t i = 0; i < headers.size(); ++i) { string h = trim_str(headers[i]); transform(h.begin(), h.end(), h.begin(), [](unsigned char c) { return (char)tolower(c); }); idx[h] = static_cast<int>(i); }
+            auto findIdx = [&](initializer_list<string> names)->int {
+                for (auto& n : names) { string low = n; transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return (char)tolower(c); }); if (idx.find(low) != idx.end()) return idx[low]; } return -1;
+                };
+            int idx_id = findIdx({ "id","admin_id","adminid" });
+            int idx_name = findIdx({ "name","firstname" });
+            int idx_last = findIdx({ "lastname","last_name" });
+            int idx_email = findIdx({ "email","mail" });
+            int idx_hash = findIdx({ "hashedpassword","hashed_password","password","hash" });
+
+            string line; bool found = false;
+            while (getline(fin, line)) {
+                if (line.empty()) continue;
+                vector<string> cols = split_csv_line(line);
+                auto getVal = [&](int ix)->string { if (ix >= 0 && ix < (int)cols.size()) return trim_str(cols[ix]); return string(); };
+                string em = getVal(idx_email);
+                if (em != identifier) continue;
+                Admin* a = new Admin();
+                string sid = getVal(idx_id); if (!sid.empty()) { try { a->set_id(stoi(sid)); } catch (...) {} }
+                string nm = getVal(idx_name); if (!nm.empty()) a->set_name(nm);
+                string ln = getVal(idx_last); if (!ln.empty()) a->set_last_name(ln);
+                a->set_email(em);
+                string hsh = getVal(idx_hash); if (!hsh.empty()) a->setHashedPassword(hsh);
+                if (!password.empty()) {
+                    if (!hsh.empty() && hsh.rfind("$2", 0) == 0) {
+#if defined(__unix__) || defined(__APPLE__)
+                        char* res = crypt(password.c_str(), hsh.c_str());
+                        if (!res || hsh != string(res)) { delete a; cout << "Admin login failed: bcrypt mismatch\n"; fin.close(); return; }
+#else
+                        cout << "Admin login: bcrypt hash present but crypt not available\n"; delete a; fin.close(); return;
+#endif
+                    }
+                    else {
+                        if (!a->checkPassword(password)) { delete a; cout << "Admin login failed: password mismatch\n"; fin.close(); return; }
+                    }
+                }
+                current = a; found = true; break;
+            }
+            fin.close();
+            if (!found) cout << "Email or password doesn’t match admin records!\n";
+            else cout << "Admin logged in: " << current->get_name() << "\n";
+        }
+
+        void logout() {
+            if (current) { delete current; current = nullptr; }
+            cout << "Admin logged out\n";
+        }
+    };
+} // namespace AdminSession
+
+// ========== Demo creator & loaders ==========
+
+void ensure_demo_files() {
+    // students (user's csv format per earlier conversation)
+    fs::path students_csv = ConfigPaths::instance().c_students;
+    if (!fs::exists(students_csv)) {
+        ofstream fout(students_csv);
+        fout << "userID,studentID,name,lastname,hashpassword,email,phone,balance\n";
+        fout << "0,4022604305,Rezvan,Kazemi," << User::simpleHash("1234")
+            << ",Rezvan.Kazemi801@gmail.com,09651065286,20000\n";
+        fout.close();
+        cout << "Created demo students file: " << students_csv << endl;
+    }
+
+    // admins
+    fs::path admins_csv = ConfigPaths::instance().c_admins;
+    if (!fs::exists(admins_csv)) {
+        ofstream fout(admins_csv);
+        fout << "id,name,lastName,email,hashedPassword\n";
+        fout << "1,Admin,User,admin@example.com," << User::simpleHash("admin") << "\n";
+        fout.close();
+        cout << "Created demo admins file: " << admins_csv << endl;
+    }
+
+    // dining halls file
+    fs::path dining_csv = ConfigPaths::instance().c_dining;
+    if (!fs::exists(dining_csv)) {
+        ofstream fout(dining_csv);
+        fout << "hallID,name,capacity,address\n";
+        fout << "1,????????,200,????????\n";
+        fout << "2,?????_???????,150,????? ???????\n";
+        fout.close();
+        cout << "Created demo dining file: " << dining_csv << endl;
+    }
+
+    // per-day meal files: saturday..thursday
+    vector<pair<string, vector<pair<int, pair<string, int>>>>> demoDays;
+    // For simplicity, each item: day filename, vector of (id, (name, price))
+    // We'll create same two meals for each day as example
+    demoDays.push_back({ "saturday.csv", {{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "sunday.csv",   {{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "monday.csv",   {{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "tuesday.csv",  {{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "wednesday.csv",{{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "thursday.csv", {{1, {"??????",15000}}, {2, {"????",12000}}} });
+
+    for (auto& day : demoDays) {
+        fs::path p = ConfigPaths::instance().meals_dir / day.first;
+        if (!fs::exists(p)) {
+            ofstream fout(p);
+            fout << "mealID,name,price,type\n";
+            for (auto& it : day.second) {
+                fout << it.first << "," << it.second.first << "," << it.second.second << ",Lunch\n";
+            }
+            fout.close();
+            cout << "Created demo meal file: " << p << endl;
+        }
+    }
+
+    // logs and tx file (touch)
+    fs::path tx = ConfigPaths::instance().t_student_transactions;
+    if (!fs::exists(tx)) {
+        ofstream fout(tx); fout.close();
+    }
+}
+
+void load_today_meals_into_storage() {
+    Storage::instance().clearMeals();
+    int uniDay = get_university_day();
+    if (uniDay == FRIDAY_OFF) {
+        // no meals
+        return;
+    }
+    string fname = dayFileName(uniDay);
+    if (fname.empty()) return;
+    fs::path p = ConfigPaths::instance().meals_dir / fname;
+    if (!fs::exists(p)) {
+        cout << "Today meal file not found: " << p << " (no meals)\n";
+        return;
+    }
+    ifstream fin(p);
+    string header;
+    if (!getline(fin, header)) { fin.close(); return; }
+    string line;
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        vector<string> cols = split_csv_line(line);
+        if (cols.size() < 3) continue;
+        Meal m;
+        try { m.set_meal_id(stoi(trim_str(cols[0]))); }
+        catch (...) { m.set_meal_id(Storage::instance().reserveNextMealID()); }
+        m.set_name(trim_str(cols[1]));
+        try { m.set_price(stof(trim_str(cols[2]))); }
+        catch (...) { m.set_price(0.0f); }
+        if (cols.size() >= 4) m.set_meal_type(mealTypeFromString(trim_str(cols[3])));
+        m.activate();
+        Storage::instance().addMeal(m);
+    }
+    fin.close();
+}
+
+void load_halls_into_storage() {
+    Storage::instance().clearHalls();
+    fs::path p = ConfigPaths::instance().c_dining;
+    if (!fs::exists(p)) return;
+    ifstream fin(p);
+    string header;
+    if (!getline(fin, header)) { fin.close(); return; }
+    string line;
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        vector<string> cols = split_csv_line(line);
+        if (cols.size() < 2) continue;
+        DiningHall d;
+        try { d.set_hall_id(stoi(trim_str(cols[0]))); }
+        catch (...) { d.set_hall_id(Storage::instance().reserveNextHallID()); }
+        d.set_name(trim_str(cols[1]));
+        if (cols.size() >= 3) { try { d.set_capacity(stoi(trim_str(cols[2]))); } catch (...) { d.set_capacity(0); } }
+        if (cols.size() >= 4) d.set_address(trim_str(cols[3]));
+        Storage::instance().addHall(d);
+    }
+    fin.close();
+}
+
+// ========== Admin CRUD helpers (meals per day & dining) ==========
+bool admin_append_meal_to_day(int uniDay, const string& name, float price, const string& typeStr) {
+    if (uniDay == FRIDAY_OFF) { cout << "Cannot add meal for Friday (off)\n"; return false; }
+    string fname = dayFileName(uniDay);
+    if (fname.empty()) return false;
+    fs::path p = ConfigPaths::instance().meals_dir / fname;
+    // find next ID by scanning file
+    int nextId = 1;
+    if (fs::exists(p)) {
+        ifstream fin(p);
+        string header;
+        if (getline(fin, header)) {
+            string line; int maxid = 0;
+            while (getline(fin, line)) {
+                if (line.empty()) continue;
+                vector<string> c = split_csv_line(line);
+                if (c.size() >= 1) {
+                    try { int id = stoi(trim_str(c[0])); if (id > maxid) maxid = id; }
+                    catch (...) {}
+                }
+            }
+            nextId = maxid + 1;
+        }
+        fin.close();
+    }
+    else {
+        // create with header
+        ofstream fout(p);
+        fout << "mealID,name,price,type\n";
+        fout.close();
+    }
+    ofstream fout(p, ios::app);
+    if (!fout.is_open()) { cout << "Failed to open " << p << " for append\n"; return false; }
+    fout << nextId << "," << name << "," << price << "," << typeStr << "\n";
+    fout.close();
+    cout << "Added meal to " << p << " with id " << nextId << "\n";
     return true;
 }
 
-bool StudentFull::cancel_reservation(int reservation_id) {
-    for (auto& res : reservations) {
-        if (res.get_reservation_id() == reservation_id) {
-            if (res.get_status() == CANCELLED) {
-                cout << "Cancellation failed: already cancelled." << endl;
-                return false;
+bool admin_remove_meal_from_day(int uniDay, int mealId) {
+    if (uniDay == FRIDAY_OFF) { cout << "No meals on Friday\n"; return false; }
+    string fname = dayFileName(uniDay);
+    fs::path p = ConfigPaths::instance().meals_dir / fname;
+    if (!fs::exists(p)) { cout << "Meal file not found: " << p << "\n"; return false; }
+    ifstream fin(p);
+    string header;
+    if (!getline(fin, header)) { fin.close(); return false; }
+    vector<string> outLines;
+    outLines.push_back(header);
+    string line;
+    bool removed = false;
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        vector<string> c = split_csv_line(line);
+        if (c.size() >= 1) {
+            try {
+                int id = stoi(trim_str(c[0]));
+                if (id == mealId) { removed = true; continue; }
             }
-            if (res.get_meal()) {
-                balance += res.get_meal()->get_price();
+            catch (...) {}
+        }
+        outLines.push_back(line);
+    }
+    fin.close();
+    // rewrite
+    ofstream fout(p, ios::trunc);
+    for (auto& l : outLines) fout << l << "\n";
+    fout.close();
+    if (removed) cout << "Removed meal " << mealId << " from " << p << "\n";
+    else cout << "Meal id not found in " << p << "\n";
+    return removed;
+}
+
+bool admin_append_hall(const string& name, int capacity, const string& address) {
+    fs::path p = ConfigPaths::instance().c_dining;
+    int nextId = 1;
+    if (fs::exists(p)) {
+        ifstream fin(p);
+        string header;
+        if (getline(fin, header)) {
+            string line; int maxid = 0;
+            while (getline(fin, line)) {
+                if (line.empty()) continue;
+                vector<string> c = split_csv_line(line);
+                if (c.size() >= 1) {
+                    try { int id = stoi(trim_str(c[0])); if (id > maxid) maxid = id; }
+                    catch (...) {}
+                }
             }
-            res.cancel();
-            cout << "Reservation cancelled successfully. Refund issued." << endl;
-            return true;
+            nextId = maxid + 1;
         }
-    }
-    cout << "Cancellation failed: reservation not found." << endl;
-    return false;
-}
-
-// ------ TRANSACTION::TRANSACTION ------
-Transaction::Transaction() {
-    _transactionID = 0;
-    _trackingCode = "";
-    _amount = 0.0f;
-    _type = PAYMENT;
-    _status = PENDING;
-    _createdAt = time(nullptr);
-}
-int Transaction::get_transaction_id() const { return _transactionID; }
-string Transaction::get_tracking_code() const { return _trackingCode; }
-float Transaction::get_amount() const { return _amount; }
-TransactionType Transaction::get_type() const { return _type; }
-TransactionStatus Transaction::get_status() const { return _status; }
-time_t Transaction::get_created_at() const { return _createdAt; }
-void Transaction::set_transaction_id(int id) { _transactionID = id; }
-void Transaction::set_tracking_code(const string& code) { _trackingCode = code; }
-void Transaction::set_amount(float amount) { _amount = amount; }
-void Transaction::set_type(TransactionType t) { _type = t; }
-void Transaction::set_status(TransactionStatus s) { _status = s; }
-void Transaction::set_created_at(time_t t) { _createdAt = t; }
-void Transaction::print() const {
-    cout << "Transaction ID: " << _transactionID << endl;
-    cout << "Tracking: " << _trackingCode << endl;
-    cout << "Amount: " << _amount << endl;
-    cout << "Status: ";
-    switch (_status) {
-    case PENDING: cout << "Pending"; break;
-    case COMPLETED: cout << "Completed"; break;
-    case FAILED_TX: cout << "Failed"; break;
-    }
-    cout << endl;
-    cout << "Created At: " << ctime(&_createdAt);
-}
-
-// ------ SHOPPINGCART::SHOPPINGCART ------
-ShoppingCart::ShoppingCart() {
-    _reservations.clear();
-}
-
-Transaction ShoppingCart::confirm() {
-    Transaction tx;
-    // generate simple id/time-based
-    int txid = static_cast<int>(time(nullptr) % 1000000);
-    tx.set_transaction_id(txid);
-    tx.set_tracking_code("TRK" + to_string(tx.get_transaction_id()));
-
-    float sum = 0.0f;
-    for (auto& r : _reservations) {
-        if (r.get_meal()) sum += r.get_meal()->get_price();
-    }
-    tx.set_amount(sum);
-    tx.set_type(PAYMENT);
-    tx.set_status(PENDING);
-    tx.set_created_at(time(nullptr));
-
-    // If a student session exists, try to deduct balance
-    Student* cur = StudentSession::SessionManager::instance().currentStudent();
-    if (cur) {
-        float bal = cur->get_balance();
-        if (sum <= 0.0f) {
-            tx.set_status(FAILED_TX);
-        }
-        else if (bal < sum) {
-            tx.set_status(FAILED_TX);
-            // leave reservations as NOT_PAID
-            cout << "Confirm failed: student's balance insufficient." << endl;
-        }
-        else {
-            // deduct and confirm
-            cur->set_balance(bal - sum);
-            tx.set_status(COMPLETED);
-            for (auto& r : _reservations) {
-                r.set_status(SUCCESS);
-                // optionally add reservation to student's reservation list
-                // cur->get_reserves() returns a copy; to push into student's reservations we need access
-                // We'll assume Student has method to add reservation in future; for now we leave as-is.
-            }
-            cout << "Confirm succeeded: amount deducted from student." << endl;
-        }
-        // append transaction to a transaction log for student
-        ofstream fout(ConfigPaths::instance().t_student_transactions, ios::app);
-        if (fout.is_open()) {
-            fout << "tx_id:" << tx.get_transaction_id()
-                << ",student_id:" << cur->get_id()
-                << ",amount:" << tx.get_amount()
-                << ",status:" << (tx.get_status() == COMPLETED ? "COMPLETED" : "FAILED")
-                << ",time:" << tx.get_created_at() << "\n";
-            fout.close();
-        }
+        fin.close();
     }
     else {
-        // no logged student: mark NOT_PAID or FAILED depending on sum
-        if (sum <= 0.0f) tx.set_status(FAILED_TX);
-        else tx.set_status(FAILED_TX); // require a payment flow
-        cout << "Confirm: no student session - transaction marked failed (no payer)." << endl;
+        ofstream f(p); f << "hallID,name,capacity,address\n"; f.close();
     }
-    return tx;
+    ofstream fout(p, ios::app);
+    if (!fout.is_open()) { cout << "Failed to open " << p << "\n"; return false; }
+    fout << nextId << "," << name << "," << capacity << "," << address << "\n";
+    fout.close();
+    cout << "Added dining hall id=" << nextId << "\n";
+    return true;
 }
 
-void ShoppingCart::addReservation(const Reservation& reservation) {
-    Reservation r = reservation;
-    r.set_status(NOT_PAID);
-    _reservations.push_back(r);
-}
-
-bool ShoppingCart::removeReservation(int ID) {
-    for (auto it = _reservations.begin(); it != _reservations.end(); ++it) {
-        if (it->get_reservation_id() == ID) {
-            _reservations.erase(it);
-            return true;
-        }
-    }
-    return false;
-}
-
-void ShoppingCart::viewShoppingCartItems() const {
-    cout << "---- Shopping Cart Items (" << _reservations.size() << ") ----" << endl;
-    for (const auto& r : _reservations) {
-        r.print();
-        cout << "------------------" << endl;
-    }
-}
-
-void ShoppingCart::clear() {
-    _reservations.clear();
-}
-
-vector<Reservation> ShoppingCart::getReservations() const {
-    return _reservations;
-}
-
-// ------ SESSIONS: SessionBase ------
-SessionBase::SessionBase() {
-    _createdAt = time(nullptr);
-    _lastTimeLogin = 0;
-    _status = ANONYMOUS;
-}
-
-// ------ StudentSession::SessionManager ------
-namespace StudentSession {
-    SessionManager::SessionManager() : _currentStudent(nullptr), _shopping_cart(nullptr), _studentID(0) {
-        _shopping_cart = new ShoppingCart();
-    }
-    SessionManager& SessionManager::instance() {
-        static SessionManager inst;
-        return inst;
-    }
-
-    // Basic CSV parsing helper
-    static vector<string> split_csv_line(const string& line) {
-        vector<string> cols;
-        string cur;
-        bool in_quotes = false;
-        for (size_t i = 0; i < line.size(); ++i) {
-            char c = line[i];
-            if (c == '"') {
-                in_quotes = !in_quotes;
+bool admin_remove_hall(int hallId) {
+    fs::path p = ConfigPaths::instance().c_dining;
+    if (!fs::exists(p)) { cout << "Dining file missing\n"; return false; }
+    ifstream fin(p);
+    string header;
+    if (!getline(fin, header)) { fin.close(); return false; }
+    vector<string> out;
+    out.push_back(header);
+    string line; bool removed = false;
+    while (getline(fin, line)) {
+        if (line.empty()) continue;
+        vector<string> c = split_csv_line(line);
+        if (c.size() >= 1) {
+            try {
+                int id = stoi(trim_str(c[0]));
+                if (id == hallId) { removed = true; continue; }
             }
-            else if (c == ',' && !in_quotes) {
-                cols.push_back(cur);
-                cur.clear();
+            catch (...) {}
+        }
+        out.push_back(line);
+    }
+    fin.close();
+    ofstream fout(p, ios::trunc);
+    for (auto& l : out) fout << l << "\n";
+    fout.close();
+    if (removed) cout << "Removed hall id=" << hallId << "\n";
+    else cout << "Hall id not found\n";
+    return removed;
+}
+
+// ========== Admin interactive menu ==========
+void admin_panel_loop() {
+    if (!AdminSession::SessionManager::instance().currentAdmin()) { cout << "No admin logged in\n"; return; }
+    int opt = 0;
+    do {
+        cout << "\n==== Admin Panel ====\n";
+        cout << "1) Show today's meals\n";
+        cout << "2) Add meal for a day\n";
+        cout << "3) Remove meal from a day\n";
+        cout << "4) Show dining halls\n";
+        cout << "5) Add dining hall\n";
+        cout << "6) Remove dining hall\n";
+        cout << "7) Refresh storage (reload today's meals & halls)\n";
+        cout << "8) Logout admin\n";
+        cout << "Choose: ";
+        if (!(cin >> opt)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid\n"; continue; }
+        if (opt == 1) {
+            int uniDay = get_university_day();
+            if (uniDay == FRIDAY_OFF) {
+                cout << "It's Friday — no meals available.\n";
             }
             else {
-                cur.push_back(c);
-            }
-        }
-        cols.push_back(cur);
-        return cols;
-    }
-
-    void SessionManager::load_session() {
-        // Attempt to load last session file for students (simple approach)
-        fs::path dir = ConfigPaths::instance().session_dir;
-        if (!fs::exists(dir)) return;
-        // look for a file like student_{id}.session (pick first)
-        for (auto& p : fs::directory_iterator(dir)) {
-            string filename = p.path().filename().string();
-            if (filename.rfind("student_", 0) == 0) {
-                // open and read basic info
-                ifstream fin(p.path());
-                if (fin.is_open()) {
-                    string line;
-                    while (getline(fin, line)) {
-                        // expect key:value per line
-                        if (line.rfind("student_id:", 0) == 0) {
-                            int sid = stoi(line.substr(11));
-                            _studentID = sid;
-                            // we won't reconstruct full student here; login handles that
-                        }
-                    }
-                    fin.close();
-                }
-                break;
-            }
-        }
-    }
-
-    void SessionManager::save_session() {
-        if (!_currentStudent) return;
-        fs::path dir = ConfigPaths::instance().session_dir;
-        if (!fs::exists(dir)) fs::create_directories(dir);
-        string fname = "student_" + to_string(_currentStudent->get_id()) + ".session";
-        fs::path fp = dir / fname;
-        ofstream fout(fp, ios::trunc);
-        if (!fout.is_open()) return;
-        fout << "student_id:" << _currentStudent->get_id() << "\n";
-        fout << "last_login:" << time(nullptr) << "\n";
-        fout.close();
-    }
-
-    void SessionManager::login(const string& identifier, const string& password) {
-        // Attempt to find student in CSV by identifier (try email or student_id)
-        fs::path students_csv = ConfigPaths::instance().c_students;
-        ifstream fin(students_csv);
-        if (!fin.is_open()) {
-            cout << "Student CSV not found at " << students_csv << " — cannot login." << endl;
-            return;
-        }
-
-        string header;
-        if (!getline(fin, header)) {
-            cout << "Student CSV empty." << endl;
-            fin.close();
-            return;
-        }
-
-        // We'll try each line; flexible mapping: assume columns:
-        // student_id,name,email,phone,balance,hashed_password (but if missing, we adapt)
-        string line;
-        bool found = false;
-        while (getline(fin, line)) {
-            if (line.empty()) continue;
-            vector<string> cols = split_csv_line(line);
-            // trim spaces
-            for (auto& c : cols) if (!c.empty() && c.front() == ' ') c.erase(0, c.find_first_not_of(' '));
-            // search identifier among likely columns
-            bool id_match = false;
-            if (!cols.empty() && cols[0] == identifier) id_match = true; // student_id
-            if (cols.size() >= 3 && cols[2] == identifier) id_match = true; // email
-            if (!id_match) continue;
-
-            // create Student and populate available fields
-            Student* s = new Student();
-            // student id
-            if (cols.size() >= 1) {
-                // if student id is numeric, set User::id to numeric
-                try {
-                    int nid = stoi(cols[0]);
-                    s->set_id(nid);
-                }
-                catch (...) {
-                    // non-numeric student_id: leave User::id as 0
-                }
-                s->set_student_id(cols[0]);
-            }
-            if (cols.size() >= 2) {
-                // name
-                s->set_name(cols[1]);
-            }
-            if (cols.size() >= 3) {
-                s->set_email(cols[2]);
-            }
-            if (cols.size() >= 4) {
-                s->set_phone(cols[3]);
-            }
-            if (cols.size() >= 5) {
-                try { s->set_balance(stof(cols[4])); }
-                catch (...) {}
-            }
-            if (cols.size() >= 6) {
-                // assume it's a hashed password
-                s->setHashedPassword(cols[5]);
-                // verify password if provided
-                if (!password.empty()) {
-                    if (!s->checkPassword(password)) {
-                        cout << "Student login failed: password mismatch." << endl;
-                        delete s;
-                        fin.close();
-                        return;
-                    }
+                Storage::instance().clearMeals();
+                load_today_meals_into_storage();
+                auto& meals = Storage::instance().getMeals();
+                if (meals.empty()) cout << "No meals for today\n";
+                else {
+                    cout << "Today's meals:\n";
+                    for (auto& m : meals) m.print();
                 }
             }
-            else {
-                // no hashed password in csv: accept login (or you may require specific logic)
-                // NOTE: for security, prefer csv to contain hashed password.
+        }
+        else if (opt == 2) {
+            cout << "Which day? (0=Saturday,1=Sunday,2=Monday,3=Tuesday,4=Wednesday,5=Thursday): ";
+            int d; cin >> d;
+            if (d < 0 || d>5) { cout << "Invalid day\n"; continue; }
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Meal name (no comma): "; string name; getline(cin, name);
+            cout << "Price (integer): "; int price; cin >> price;
+            cout << "Type (Breakfast/Lunch/Dinner): "; string type; cin >> ws; getline(cin, type);
+            if (admin_append_meal_to_day(d, name, (float)price, type)) {
+                cout << "Added.\n";
             }
-
-            // found and set
-            _currentStudent = s;
-            _studentID = s->get_id();
-            _status = AUTHENTICATED;
-            _lastTimeLogin = time(nullptr);
-            cout << "StudentSession: logged in (" << identifier << ")" << endl;
-            found = true;
+        }
+        else if (opt == 3) {
+            cout << "Which day to remove from? (0=Sat..5=Thu): "; int d; cin >> d;
+            if (d < 0 || d>5) { cout << "Invalid\n"; continue; }
+            cout << "Enter mealID to remove: "; int mid; cin >> mid;
+            admin_remove_meal_from_day(d, mid);
+        }
+        else if (opt == 4) {
+            load_halls_into_storage();
+            auto& h = Storage::instance().getHalls();
+            if (h.empty()) cout << "No dining halls\n";
+            else for (auto& hh : h) hh.print();
+        }
+        else if (opt == 5) {
+            cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Hall name: "; string name; getline(cin, name);
+            cout << "Capacity: "; int cap; cin >> cap; cin.ignore(numeric_limits<streamsize>::max(), '\n');
+            cout << "Address: "; string addr; getline(cin, addr);
+            admin_append_hall(name, cap, addr);
+        }
+        else if (opt == 6) {
+            cout << "Enter hallID to remove: "; int hid; cin >> hid;
+            admin_remove_hall(hid);
+        }
+        else if (opt == 7) {
+            load_halls_into_storage();
+            load_today_meals_into_storage();
+            cout << "Reloaded storage from CSVs\n";
+        }
+        else if (opt == 8) {
+            AdminSession::SessionManager::instance().logout();
             break;
         }
-        fin.close();
-        if (!found) {
-            cout << "Student not found in CSV." << endl;
+    } while (opt != 8);
+}
+
+// ========== Student interactive loop ==========
+void student_panel_loop() {
+    Student* cur = StudentSession::SessionManager::instance().currentStudent();
+    if (!cur) { cout << "No student logged in\n"; return; }
+    // ensure student active (quick fix requested)
+    if (!cur->is_active()) cur->activate();
+
+    // load today's meals & halls
+    load_halls_into_storage();
+    load_today_meals_into_storage();
+
+    cout << "\nWelcome " << cur->get_name() << " | Balance: " << cur->get_balance() << "\n";
+
+    int opt = 0;
+    do {
+        cout << "\n--- Student Menu ---\n";
+        cout << "1) View Today's Meals\n";
+        cout << "2) View Dining Halls\n";
+        cout << "3) Reserve a Meal\n";
+        cout << "4) View Reservations\n";
+        cout << "5) Increase Balance\n";
+        cout << "6) Logout\n";
+        cout << "Choose: ";
+        if (!(cin >> opt)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid\n"; continue; }
+        if (opt == 1) {
+            int uniDay = get_university_day();
+            if (uniDay == FRIDAY_OFF) { cout << "Today is Friday — no meals.\n"; continue; }
+            auto& meals = Storage::instance().getMeals();
+            if (meals.empty()) { cout << "No meals today.\n"; continue; }
+            cout << "Meals for today:\n";
+            for (auto& m : meals) m.print();
         }
-    }
-
-    void SessionManager::logout() {
-        if (_currentStudent) {
-            // save session before logout
-            save_session();
-            delete _currentStudent;
-            _currentStudent = nullptr;
+        else if (opt == 2) {
+            auto& halls = Storage::instance().getHalls();
+            if (halls.empty()) { cout << "No dining halls\n"; continue; }
+            cout << "Dining Halls:\n";
+            for (auto& h : halls) h.print();
         }
-        _status = ANONYMOUS;
-        _lastTimeLogin = time(nullptr);
-        // clear shopping cart if needed
-        if (_shopping_cart) {
-            _shopping_cart->clear();
+        else if (opt == 3) {
+            int mealId, hallId;
+            cout << "Enter mealID: "; cin >> mealId;
+            cout << "Enter hallID: "; cin >> hallId;
+            Meal* m = Storage::instance().findMealByID(mealId);
+            DiningHall* h = Storage::instance().findHallByID(hallId);
+            if (!m) { cout << "Meal not found\n"; continue; }
+            if (!h) { cout << "Hall not found\n"; continue; }
+            cur->reserve_meal(m, h);
         }
-        cout << "StudentSession: logged out" << endl;
-    }
-
-    Student* SessionManager::currentStudent() const {
-        return _currentStudent;
-    }
-    ShoppingCart* SessionManager::shoppingCart() const {
-        return _shopping_cart;
-    }
-} // namespace StudentSession
-
-// ------ AdminSession::SessionManager ------
-namespace AdminSession {
-    SessionManager::SessionManager() : _currentAdmin(nullptr), _adminID(0) {}
-    AdminSession::SessionManager& SessionManager::instance() {
-        static AdminSession::SessionManager inst;
-        return inst;
-    }
-
-    void SessionManager::load_session() {
-        // similar idea to student sessions; not fully required
-    }
-    void SessionManager::save_session() {
-        // save admin session info to file if needed
-        if (!_currentAdmin) return;
-        fs::path dir = ConfigPaths::instance().session_dir;
-        if (!fs::exists(dir)) fs::create_directories(dir);
-        string fname = "admin_" + to_string(_currentAdmin->get_id()) + ".session";
-        fs::path fp = dir / fname;
-        ofstream fout(fp, ios::trunc);
-        if (!fout.is_open()) return;
-        fout << "admin_id:" << _currentAdmin->get_id() << "\n";
-        fout << "last_login:" << time(nullptr) << "\n";
-        fout.close();
-    }
-
-    void SessionManager::login(const string& identifier, const string& password) {
-        // read admins CSV and attempt to match
-        fs::path admins_csv = ConfigPaths::instance().c_admins;
-        ifstream fin(admins_csv);
-        if (!fin.is_open()) {
-            cout << "Admin CSV not found at " << admins_csv << " — cannot login admin." << endl;
-            return;
+        else if (opt == 4) {
+            auto rs = cur->get_reservations();
+            if (rs.empty()) cout << "No reservations\n";
+            else for (auto& r : rs) r.print();
         }
-        string header;
-        getline(fin, header);
-        string line;
-        bool found = false;
-        while (getline(fin, line)) {
-            if (line.empty()) continue;
-            // simple split
-            vector<string> cols;
-            stringstream ss(line);
-            string item;
-            while (getline(ss, item, ',')) cols.push_back(item);
-            // assume columns: id,name,lastName,email,hashedPassword
-            if (cols.size() >= 4) {
-                if (cols[3] == identifier) {
-                    Admin* a = new Admin();
-                    try { a->set_id(stoi(cols[0])); }
-                    catch (...) {}
-                    a->set_name(cols[1]);
-                    a->set_last_name(cols[2]);
-                    a->set_email(cols[3]);
-                    if (cols.size() >= 5) {
-                        a->setHashedPassword(cols[4]);
-                        if (!password.empty() && !a->checkPassword(password)) {
-                            delete a;
-                            cout << "Admin login failed: password mismatch." << endl;
-                            fin.close();
-                            return;
-                        }
-                    }
-                    _currentAdmin = a;
-                    _adminID = a->get_id();
-                    _status = AUTHENTICATED;
-                    _lastTimeLogin = time(nullptr);
-                    cout << "AdminSession: logged in (" << identifier << ")" << endl;
-                    found = true;
-                    break;
-                }
+        else if (opt == 5) {
+            cout << "Amount to add: "; float amt; cin >> amt; cur->set_balance(cur->get_balance() + amt);
+            cout << "Balance updated: " << cur->get_balance() << "\n";
+        }
+        else if (opt == 6) {
+            StudentSession::SessionManager::instance().logout();
+            break;
+        }
+    } while (opt != 6);
+}
+
+// ========== Main ==========
+int main() {
+    cout << "Reservation System (University Style) - Phase 4\n";
+    ensure_demo_files();
+
+    // initial load
+    load_halls_into_storage();
+    load_today_meals_into_storage();
+
+    while (true) {
+        cout << "\n=== Main Menu ===\n";
+        cout << "1) Student Login\n";
+        cout << "2) Admin Login\n";
+        cout << "3) Exit\n";
+        cout << "Choose: ";
+        int ch;
+        if (!(cin >> ch)) { cin.clear(); cin.ignore(numeric_limits<streamsize>::max(), '\n'); cout << "Invalid input\n"; continue; }
+        if (ch == 1) {
+            cout << "Enter email or studentID: "; string id; cin >> id;
+            cout << "Enter password: "; string pw; cin >> pw;
+            StudentSession::SessionManager::instance().login(id, pw);
+            if (StudentSession::SessionManager::instance().currentStudent()) {
+                student_panel_loop();
             }
         }
-        fin.close();
-        if (!found) cout << "Admin not found in CSV." << endl;
-    }
-
-    void SessionManager::logout() {
-        if (_currentAdmin) {
-            save_session();
-            delete _currentAdmin;
-            _currentAdmin = nullptr;
+        else if (ch == 2) {
+            cout << "Enter admin email: "; string em; cin >> em;
+            cout << "Enter password: "; string pw; cin >> pw;
+            AdminSession::SessionManager::instance().login(em, pw);
+            if (AdminSession::SessionManager::instance().currentAdmin()) {
+                admin_panel_loop();
+            }
         }
-        _status = ANONYMOUS;
-        _lastTimeLogin = time(nullptr);
-        cout << "AdminSession: logged out" << endl;
+        else if (ch == 3) {
+            cout << "Bye\n";
+            break;
+        }
+        else {
+            cout << "Invalid option\n";
+        }
     }
 
-    Admin* SessionManager::currentAdmin() const {
-        return _currentAdmin;
-    }
-} // namespace AdminSession
-
-// ------ STORAGE methods ------
-void Storage::addMeal(const Meal& m) {
-    allMeals.push_back(m);
-}
-void Storage::addDiningHall(const DiningHall& d) {
-    allDiningHalls.push_back(d);
-}
-void Storage::removeMeal(int id) {
-    allMeals.erase(remove_if(allMeals.begin(), allMeals.end(),
-        [id](const Meal& m) { return m.get_meal_id() == id; }), allMeals.end());
-}
-void Storage::removeDiningHall(int id) {
-    allDiningHalls.erase(remove_if(allDiningHalls.begin(), allDiningHalls.end(),
-        [id](const DiningHall& d) { return d.get_hall_id() == id; }), allDiningHalls.end());
-}
-void Storage::mealActivation(int id, bool active) {
-    for (auto& m : allMeals) if (m.get_meal_id() == id) {
-        if (active) m.activate(); else m.deactivate();
-    }
-}
-vector<Meal>::iterator Storage::findMeal(int id) {
-    return find_if(allMeals.begin(), allMeals.end(),
-        [id](const Meal& m) { return m.get_meal_id() == id; });
-}
-vector<DiningHall>::iterator Storage::findDiningHall(int id) {
-    return find_if(allDiningHalls.begin(), allDiningHalls.end(),
-        [id](const DiningHall& d) { return d.get_hall_id() == id; });
-}
-
-// ------ ADMINPANEL ------
-void AdminPanel::chooseCsvFile(const fs::path& p) {
-    cout << "Admin selected CSV file: " << p << endl;
-}
-void AdminPanel::displayAllMeals() {
-    for (auto& m : Storage::instance().getAllMeals()) m.print();
-}
-void AdminPanel::displayAllDiningHalls() {
-    for (auto& d : Storage::instance().getAllDiningHalls()) d.print();
-}
-void AdminPanel::addNewMealInteractive() {
-    // skeleton: interactive prompt to add meal (not mandatory)
-    cout << "Add new meal interactive (not implemented)." << endl;
-}
-void AdminPanel::addNewDiningHallInteractive() {
-    cout << "Add new dining hall interactive (not implemented)." << endl;
-}
-void AdminPanel::removeMeal(int id) { Storage::instance().removeMeal(id); }
-void AdminPanel::mealActivation(int id, bool active) { Storage::instance().mealActivation(id, active); }
-void AdminPanel::removeDiningHall(int id) { Storage::instance().removeDiningHall(id); }
-void AdminPanel::showMenu() { cout << "AdminPanel menu (not implemented)." << endl; }
-void AdminPanel::action(int opt) { cout << "AdminPanel action " << opt << " (not implemented)." << endl; }
-
-// ------ PANEL methods (empty skeletons) ------
-void Panel::Action(int) { /* stub */ }
-void Panel::showMenu() { /* stub */ }
-void Panel::showStudentInfo() { /* stub */ }
-void Panel::checkBalance() { /* stub */ }
-void Panel::viewReservations() { /* stub */ }
-void Panel::viewShoppingCart() { /* stub */ }
-void Panel::addToShoppingCart() { /* stub */ }
-void Panel::removeShoppingCartItem() { /* stub */ }
-void Panel::increaseBalance() { /* stub */ }
-void Panel::exit() { /* stub */ }
-
-//=================================================================================
-
-int main() {
-    // quick sanity test for Phase 4 changes
-
-    // prepare ConfigPaths (defaults already set)
-    cout << "Config students csv: " << ConfigPaths::instance().c_students << endl;
-
-    // seed storage
-    Meal m;
-    m.set_meal_id(1);
-    m.set_name("Pasta");
-    m.set_price(30.0f);
-    m.activate();
-    Storage::instance().addMeal(m);
-
-    DiningHall d;
-    d.set_hall_id(1);
-    d.set_name("Main Dining");
-    d.set_capacity(200);
-    Storage::instance().addDiningHall(d);
-
-    // Simulate a student record in CSV for test (you said you have CSV; this is just demo)
-    // NOTE: In real use you won't write CSV here; keep for local quick test only.
-    {
-        ofstream fout(ConfigPaths::instance().c_students, ios::trunc);
-        fout << "student_id,name,email,phone,balance,hashed_password\n";
-        // password "pass123" hashed with std::hash placeholder
-        hash<string> hasher;
-        fout << "1,Ali,ali@test.com,0912000000,100," << to_string(hasher("pass123")) << "\n";
-        fout.close();
-    }
-
-    // login student via StudentSession (will check CSV)
-    StudentSession::SessionManager::instance().login("ali@test.com", "pass123");
-    Student* cur = StudentSession::SessionManager::instance().currentStudent();
-    if (cur) {
-        cout << "Logged student: " << cur->get_name() << " balance: " << cur->get_balance() << endl;
-        // create reservation and push to shopping cart
-        Reservation r;
-        r.set_reservation_id(1);
-        r.set_student(cur);
-        r.set_meal(&m);
-        r.set_dining_hall(&d);
-        r.set_status(NOT_PAID);
-        r.set_created_at(time(nullptr));
-        StudentSession::SessionManager::instance().shoppingCart()->addReservation(r);
-        StudentSession::SessionManager::instance().shoppingCart()->viewShoppingCartItems();
-
-        // confirm
-        Transaction tx = StudentSession::SessionManager::instance().shoppingCart()->confirm();
-        tx.print();
-
-        // save session
-        StudentSession::SessionManager::instance().save_session();
-
-        // logout
-        StudentSession::SessionManager::instance().logout();
-    }
-
-    cout << "Phase 4 integrated test complete." << endl;
     return 0;
 }
