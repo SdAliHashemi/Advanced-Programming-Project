@@ -151,8 +151,6 @@ static int get_university_day() {
     struct tm local_tm;
     localtime_s(&local_tm, &now);
     int wday = local_tm.tm_wday; // 0=Sunday ... 6=Saturday
-    // convert C-style wday to uniDay where Saturday=0
-    // C: 0=Sunday,1=Monday,2=Tuesday,3=Wednesday,4=Thursday,5=Friday,6=Saturday
     if (wday == 6) return 0; // Saturday
     if (wday == 0) return 1; // Sunday
     if (wday == 1) return 2; // Monday
@@ -623,13 +621,12 @@ namespace AdminSession {
 // ========== Demo creator & loaders ==========
 
 void ensure_demo_files() {
-    // students (user's csv format per earlier conversation)
     fs::path students_csv = ConfigPaths::instance().c_students;
     if (!fs::exists(students_csv)) {
         ofstream fout(students_csv);
         fout << "userID,studentID,name,lastname,hashpassword,email,phone,balance\n";
-        fout << "0,4022604305,Rezvan,Kazemi," << User::simpleHash("1234")
-            << ",Rezvan.Kazemi801@gmail.com,09651065286,20000\n";
+        fout << "0,4022604305,Ali,Hashemi," << User::simpleHash("1234")
+            << ",ali@example.com,09651065286,20000\n";
         fout.close();
         cout << "Created demo students file: " << students_csv << endl;
     }
@@ -649,8 +646,8 @@ void ensure_demo_files() {
     if (!fs::exists(dining_csv)) {
         ofstream fout(dining_csv);
         fout << "hallID,name,capacity,address\n";
-        fout << "1,????????,200,????????\n";
-        fout << "2,?????_???????,150,????? ???????\n";
+        fout << "1,AmirAbaad,200,AmirAbaad\n";
+        fout << "2,Shokat_BrosPardis,150,Shokat_BrosPardis\n";
         fout.close();
         cout << "Created demo dining file: " << dining_csv << endl;
     }
@@ -659,12 +656,12 @@ void ensure_demo_files() {
     vector<pair<string, vector<pair<int, pair<string, int>>>>> demoDays;
     // For simplicity, each item: day filename, vector of (id, (name, price))
     // We'll create same two meals for each day as example
-    demoDays.push_back({ "saturday.csv", {{1, {"??????",15000}}, {2, {"????",12000}}} });
-    demoDays.push_back({ "sunday.csv",   {{1, {"??????",15000}}, {2, {"????",12000}}} });
-    demoDays.push_back({ "monday.csv",   {{1, {"??????",15000}}, {2, {"????",12000}}} });
-    demoDays.push_back({ "tuesday.csv",  {{1, {"??????",15000}}, {2, {"????",12000}}} });
-    demoDays.push_back({ "wednesday.csv",{{1, {"??????",15000}}, {2, {"????",12000}}} });
-    demoDays.push_back({ "thursday.csv", {{1, {"??????",15000}}, {2, {"????",12000}}} });
+    demoDays.push_back({ "saturday.csv", {{1, {"ZereshkPolo_Morq",15000}}, {2, {"Khorsh_Bamiye",12000}}} });
+    demoDays.push_back({ "sunday.csv",   {{1, {"KababKobide",15000}}, {2, {"Stanboli",12000}}} });
+    demoDays.push_back({ "monday.csv",   {{1, {"TonMahi",15000}}, {2, {"Khoresh_Qeyme",12000}}} });
+    demoDays.push_back({ "tuesday.csv",  {{1, {"Khoresh_QormeSabzi",15000}}, {2, {"LobiaPolo",12000}}} });
+    demoDays.push_back({ "wednesday.csv",{{1, {"Joj",15000}}, {2, {"Gosht",12000}}} });
+    demoDays.push_back({ "thursday.csv", {{1, {"IDK BRO",15000}}, {2, {"WTF",12000}}} });
 
     for (auto& day : demoDays) {
         fs::path p = ConfigPaths::instance().meals_dir / day.first;
@@ -1023,7 +1020,7 @@ void student_panel_loop() {
 
 // ========== Main ==========
 int main() {
-    cout << "Reservation System (University Style) - Phase 4\n";
+    cout << "Reservation System - Phase 4\n";
     ensure_demo_files();
 
     // initial load
